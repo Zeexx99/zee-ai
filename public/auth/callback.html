@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Zee AI – signing in</title>
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <style>body{font-family:"Segoe UI",system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#444}</style>
+  </head>
+  <body>
+    <p id="msg">Finishing sign-in…</p>
+    <script>
+      // Google redirects here with the token in the URL fragment (#access_token=...).
+      // We hand the result back to the task pane and the task pane closes this dialog.
+      Office.onReady(function () {
+        var hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        var query = new URLSearchParams(window.location.search);
+        var payload;
+        var error = hash.get("error") || query.get("error");
+        if (error) {
+          payload = { ok: false, error: error, state: hash.get("state") || query.get("state") };
+        } else if (hash.get("access_token")) {
+          payload = {
+            ok: true,
+            accessToken: hash.get("access_token"),
+            expiresIn: Number(hash.get("expires_in") || "3600"),
+            scope: hash.get("scope") || "",
+            state: hash.get("state")
+          };
+        } else {
+          payload = { ok: false, error: "no_token_returned" };
+        }
+        try {
+          Office.context.ui.messageParent(JSON.stringify(payload));
+        } catch (e) {
+          document.getElementById("msg").textContent =
+            "Could not return to Excel. Close this window and try again.";
+        }
+      });
+    </script>
+  </body>
+</html>

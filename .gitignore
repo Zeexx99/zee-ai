@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env*
+*.log
+client-log.txt
+diag-log.txt
+diag2-log.txt
+setup-log.txt
+setup-status.txt
+start-log.txt
+manifest-old*.xml
+push-*/

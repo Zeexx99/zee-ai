@@ -1,0 +1,16 @@
+{
+  "functions": [
+    {
+      "id": "ASK",
+      "name": "ASK",
+      "description": "Ask Gemini and return a short answer in the cell. Example: =ZEE.ASK(\"Classify this failure\", B2)",
+      "helpUrl": "https://aistudio.google.com/",
+      "result": { "type": "string", "dimensionality": "scalar" },
+      "parameters": [
+        { "name": "prompt", "description": "What to ask or do, e.g. \"Extract the city\".", "type": "string", "dimensionality": "scalar" },
+        { "name": "context", "description": "Optional cells or ranges the prompt applies to.", "type": "any", "dimensionality": "matrix", "optional": true, "repeating": true }
+      ],
+      "options": { "cancelable": true }
+    }
+  ]
+}

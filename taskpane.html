@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Zee AI</title>
+    <script>
+      // Early error capture: shows startup errors in the pane and sends them to the dev server log.
+      (function () {
+        var isLocal = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+        function send(type, msg) {
+          if (!isLocal) return; // only the local dev/preview server records client logs
+          try {
+            fetch("__zee_log", { method: "POST", body: JSON.stringify({ type: type, msg: String(msg).slice(0, 4000), href: location.href, ua: navigator.userAgent }) });
+          } catch (e) {}
+        }
+        function show(msg) {
+          var el = document.getElementById("zee-boot-error");
+          if (!el) {
+            el = document.createElement("pre");
+            el.id = "zee-boot-error";
+            el.style.cssText = "white-space:pre-wrap;color:#b42318;background:#fff4f2;border:1px solid #f3c2bc;padding:8px;margin:8px;font:12px Consolas,monospace";
+            (document.body || document.documentElement).appendChild(el);
+          }
+          el.textContent += msg + "\n\n";
+        }
+        window.__zeeLog = send;
+        window.__zeeShowError = show;
+        window.addEventListener("error", function (e) {
+          var t = e.target;
+          var msg = t && t !== window && (t.src || t.href)
+            ? "Failed to load resource: " + (t.src || t.href)
+            : (e.message || "error") + " @ " + (e.filename || "") + ":" + (e.lineno || "") + "\n" + ((e.error && e.error.stack) || "");
+          send("error", msg);
+          show(msg);
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          var msg = "Unhandled promise rejection: " + ((r && (r.stack || r.message)) || r);
+          send("rejection", msg);
+          show(msg);
+        });
+        // Forward console errors/warnings (React warnings, Fluent errors...).
+        ["error", "warn"].forEach(function (lvl) {
+          var orig = console[lvl];
+          console[lvl] = function () {
+            try { send("console." + lvl, Array.prototype.map.call(arguments, function (a) { return a && a.stack ? a.stack : (typeof a === "object" ? JSON.stringify(a) : String(a)); }).join(" ")); } catch (e) {}
+            return orig.apply(console, arguments);
+          };
+        });
+        send("boot", "taskpane.html loaded");
+      })();
+    </script>
+    <!-- Office.js must be loaded from Microsoft's CDN (not bundled). -->
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

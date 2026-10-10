@@ -1,0 +1,42 @@
+{
+  "name": "zee-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zee AI - Gemini-powered copilot task pane for Microsoft Excel",
+  "type": "module",
+  "scripts": {
+    "certs": "office-addin-dev-certs install",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "validate": "office-addin-manifest validate manifest.xml",
+    "start:desktop": "office-addin-debugging start manifest.xml desktop --dev-server \"npm run dev\" --dev-server-port 3100",
+    "start:web": "office-addin-debugging start manifest.xml web --dev-server \"npm run dev\" --dev-server-port 3100",
+    "stop": "office-addin-debugging stop manifest.xml",
+    "manifest:prod": "node scripts/make-manifest.mjs",
+    "validate:prod": "office-addin-manifest validate manifest.prod.xml"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.56.0",
+    "@fluentui/react-icons": "^2.0.270",
+    "highlight.js": "^11.10.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "rehype-highlight": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "lowlight": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/office-js": "^1.0.440",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "office-addin-debugging": "^5.1.6",
+    "office-addin-dev-certs": "^1.13.5",
+    "office-addin-manifest": "^1.13.6",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
