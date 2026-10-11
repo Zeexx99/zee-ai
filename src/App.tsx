@@ -506,8 +506,12 @@ export default function App() {
     if (!src) return;
     setJob({ text: "Drawing chart…" });
     try {
-      const title = await plotColumns({ source: src, xIndex: c.xIndex, yIndexes: c.yIndexes, kind: c.kind, title: c.title });
-      toast("success", "Chart created", `${title} · ${c.yIndexes.length} series on ${src.sheetName}`);
+      const r = await plotColumns({ source: src, xIndex: c.xIndex, yIndexes: c.yIndexes, chartType: c.chartType, title: c.title });
+      toast(
+        "success",
+        "Chart created",
+        `${r.title} on ${src.sheetName}${r.helperSheet ? ` · linked data copied to sheet "${r.helperSheet}" (this chart type needs adjacent columns)` : ""}`
+      );
     } catch (e) {
       toastError(e);
     } finally {

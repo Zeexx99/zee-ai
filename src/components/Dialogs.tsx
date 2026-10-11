@@ -21,7 +21,8 @@ import {
 import { DEFAULT_CLEAN_OPTIONS, type CaseMode, type CleanOptions, type DateOrder } from "../utils/clean";
 import { EXTRACT_LABELS, type ExtractKind } from "../utils/extract";
 import { UNIT_CONVERSIONS } from "../utils/petro";
-import type { ChartKind, PlotKind, PlotSource } from "../services/excelService";
+import type { ChartKind, PlotSource } from "../services/excelService";
+import { CHART_GROUPS, CHART_TYPES, chartTypeInfo, checkYCount } from "../utils/chartTypes";
 
 /* ------------------------------------------------------------ confirm */
 
@@ -371,22 +372,33 @@ export function ChartDialog({ open, onClose, onRun }: { open: boolean; onClose: 
 export interface DrawChoice {
   xIndex: number;
   yIndexes: number[];
-  kind: PlotKind;
+  /** Excel.ChartType value. */
+  chartType: string;
   title: string;
 }
 
-const PLOT_LABELS: Record<PlotKind, string> = {
-  line: "Line",
-  scatterLines: "Scatter with lines (numeric / date X)",
-  scatter: "Scatter (points only)",
-  column: "Column",
-};
+const LAST_TYPE_KEY = "zeeai.draw.lastType";
+function lastChartType(): string | null {
+  try {
+    const v = localStorage.getItem(LAST_TYPE_KEY);
+    return v && CHART_TYPES.some((t) => t.id === v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+function rememberChartType(id: string) {
+  try {
+    localStorage.setItem(LAST_TYPE_KEY, id);
+  } catch {
+    /* ignore */
+  }
+}
 
 export function DrawDialog({ source, onClose, onRun }: { source: PlotSource | null; onClose: () => void; onRun: (c: DrawChoice) => void }) {
   const cols = source?.columns ?? [];
   const [xIndex, setXIndex] = useState(0);
   const [yIndexes, setYIndexes] = useState<number[]>([]);
-  const [kind, setKind] = useState<PlotKind>("line");
+  const [chartType, setChartType] = useState("Line");
   const [title, setTitle] = useState("");
 
   // New data source → sensible defaults: first column on X, the next numeric columns (up to 4) on Y.
@@ -395,11 +407,19 @@ export function DrawDialog({ source, onClose, onRun }: { source: PlotSource | nu
     const x = source.columns[0]?.index ?? 0;
     setXIndex(x);
     setYIndexes(source.columns.filter((c) => c.index !== x && c.numeric).slice(0, 4).map((c) => c.index));
-    setKind(source.columns[0]?.numeric ? "scatterLines" : "line");
+    setChartType(lastChartType() ?? (source.columns[0]?.numeric ? "XYScatterLinesNoMarkers" : "Line"));
     setTitle("");
   }, [source]);
 
+  // Types that take a fixed number of Y columns (pie, pareto, bubble…): drop the extras automatically.
+  useEffect(() => {
+    const max = chartTypeInfo(chartType).maxY;
+    if (max !== undefined) setYIndexes((prev) => (prev.length > max ? prev.slice(0, max) : prev));
+  }, [chartType, source]);
+
   const xCol = cols.find((c) => c.index === xIndex);
+  const info = chartTypeInfo(chartType);
+  const yProblem = checkYCount(info, yIndexes.length);
   const yChoices = cols.filter((c) => c.index !== xIndex);
   const toggle = (idx: number, on: boolean) =>
     setYIndexes((prev) => (on ? [...prev, idx].sort((a, b) => a - b) : prev.filter((i) => i !== idx)));
@@ -465,12 +485,26 @@ export function DrawDialog({ source, onClose, onRun }: { source: PlotSource | nu
               </div>
             </section>
 
-            <Field label="Chart type">
-              <Dropdown value={PLOT_LABELS[kind]} selectedOptions={[kind]} onOptionSelect={(_, d) => d.optionValue && setKind(d.optionValue as PlotKind)}>
-                {(Object.keys(PLOT_LABELS) as PlotKind[]).map((k) => (
-                  <Option key={k} value={k}>
-                    {PLOT_LABELS[k]}
-                  </Option>
+            <Field
+              label={`Chart type (${CHART_TYPES.length} available)`}
+              hint={info.hint ?? (info.group === "Pie & doughnut" || info.group === "Radar" ? undefined : "X goes on the horizontal axis; each ticked Y column is one series.")}
+              validationState={yProblem && yIndexes.length > 0 ? "warning" : "none"}
+              validationMessage={yProblem && yIndexes.length > 0 ? yProblem : undefined}
+            >
+              <Dropdown
+                value={`${info.group} › ${info.label}`}
+                selectedOptions={[chartType]}
+                onOptionSelect={(_, d) => d.optionValue && setChartType(d.optionValue)}
+                listbox={{ style: { maxHeight: "320px" } }}
+              >
+                {CHART_GROUPS.map((g) => (
+                  <OptionGroup key={g} label={g}>
+                    {CHART_TYPES.filter((t) => t.group === g).map((t) => (
+                      <Option key={t.id} value={t.id} text={`${g} › ${t.label}`}>
+                        {t.label}
+                      </Option>
+                    ))}
+                  </OptionGroup>
                 ))}
               </Dropdown>
             </Field>
@@ -482,7 +516,14 @@ export function DrawDialog({ source, onClose, onRun }: { source: PlotSource | nu
             <Button appearance="secondary" onClick={onClose}>
               Cancel
             </Button>
-            <Button appearance="primary" disabled={!yIndexes.length} onClick={() => onRun({ xIndex, yIndexes, kind, title: title.trim() })}>
+            <Button
+              appearance="primary"
+              disabled={!!yProblem}
+              onClick={() => {
+                rememberChartType(chartType);
+                onRun({ xIndex, yIndexes, chartType, title: title.trim() });
+              }}
+            >
               Draw chart
             </Button>
           </DialogActions>

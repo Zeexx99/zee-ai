@@ -12,6 +12,7 @@ import { a1, a1Range, columnLetter, quoteSheet, stripSheet, EXCEL_MAX_ROWS } fro
 import { cleanCell, type CleanOptions } from "../utils/clean";
 import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
+import { chartTypeInfo, checkYCount } from "../utils/chartTypes";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -1058,62 +1059,87 @@ export async function getPlotSource(): Promise<PlotSource> {
   });
 }
 
-export type PlotKind = "line" | "scatterLines" | "scatter" | "column";
-const PLOT_TYPES: Record<PlotKind, string> = {
-  line: "Line",
-  scatterLines: "XYScatterLinesNoMarkers",
-  scatter: "XYScatter",
-  column: "ColumnClustered",
-};
-
 export interface PlotRequest {
   source: PlotSource;
   xIndex: number;
   yIndexes: number[];
-  kind: PlotKind;
+  /** Excel.ChartType value from utils/chartTypes. */
+  chartType: string;
   title?: string;
 }
 
-/** Chart several Y columns against one X column (columns need not be next to each other). */
-export async function plotColumns(req: PlotRequest): Promise<string> {
+const HELPER_MAX_ROWS = 50_000;
+
+/** Chart several Y columns against one X column, in any Excel chart type. */
+export async function plotColumns(req: PlotRequest): Promise<{ title: string; helperSheet?: string }> {
   const { source: src } = req;
-  if (!req.yIndexes.length) throw new ExcelUserError("Tick at least one column to plot on the Y axis.");
+  const info = chartTypeInfo(req.chartType);
+  const yIdx = [...req.yIndexes].sort((a, b) => a - b); // sheet order (matters for stock charts)
+  const yProblem = checkYCount(info, yIdx.length);
+  if (yProblem) throw new ExcelUserError(yProblem);
   const rows = src.lastDataRow - src.firstDataRow + 1;
   if (rows < 1) throw new ExcelUserError("There are no data rows under the header.");
   const colByIndex = new Map(src.columns.map((c) => [c.index, c]));
-  const xName = colByIndex.get(req.xIndex)?.name ?? "X";
+  const nameOf = (i: number) => colByIndex.get(i)?.name ?? columnLetter(i);
+  const xName = nameOf(req.xIndex);
+  const yNames = yIdx.map(nameOf);
+  const autoTitle = info.useX ? `${yNames.join(", ")} vs ${xName}` : yNames.join(", ");
+  const title = (req.title?.trim() || autoTitle).slice(0, 120);
+
+  // Range-based types need one contiguous block: [X?, Y1, Y2, ...] in that order.
+  const blockCols = info.mode === "range" ? (info.useX ? [req.xIndex, ...yIdx] : yIdx) : [];
+  const contiguous = blockCols.every((c, k) => k === 0 || c === blockCols[k - 1] + 1);
+  let helperSheet: string | undefined;
+  if (info.mode === "range" && !contiguous) {
+    if (rows > HELPER_MAX_ROWS) throw new ExcelUserError(`For ${info.label}, put the columns side by side (X first) or select at most ${HELPER_MAX_ROWS.toLocaleString()} rows.`);
+    helperSheet = await addSheet("Chart data", false);
+  }
+
   return run(async (ctx) => {
     const ws = ctx.workbook.worksheets.getItem(src.sheetName);
-    const xRange = ws.getRangeByIndexes(src.firstDataRow, req.xIndex, rows, 1);
-    const yRanges = req.yIndexes.map((i) => ws.getRangeByIndexes(src.firstDataRow, i, rows, 1));
+    let chart: Excel.Chart;
 
-    const chart = ws.charts.add(PLOT_TYPES[req.kind] as Excel.ChartType, yRanges[0], Excel.ChartSeriesBy.columns);
-    const first = chart.series.getItemAt(0);
-    first.name = colByIndex.get(req.yIndexes[0])?.name ?? "Series 1";
-    first.setXAxisValues(xRange);
-    req.yIndexes.slice(1).forEach((idx, k) => {
-      const s = chart.series.add(colByIndex.get(idx)?.name ?? `Series ${k + 2}`);
-      s.setValues(yRanges[k + 1]);
-      s.setXAxisValues(xRange);
-    });
-
-    const title = req.title?.trim() || `${req.yIndexes.map((i) => colByIndex.get(i)?.name ?? "").join(", ")} vs ${xName}`;
-    chart.title.text = title.length > 120 ? `${title.slice(0, 117)}…` : title;
-    chart.title.visible = true;
-    chart.legend.visible = true;
-    chart.legend.position = Excel.ChartLegendPosition.bottom;
-    try {
-      chart.axes.categoryAxis.title.text = xName;
-      chart.axes.categoryAxis.title.visible = true;
-      if (req.yIndexes.length === 1) {
-        chart.axes.valueAxis.title.text = colByIndex.get(req.yIndexes[0])?.name ?? "";
-        chart.axes.valueAxis.title.visible = true;
+    if (info.mode === "series") {
+      const xRange = ws.getRangeByIndexes(src.firstDataRow, req.xIndex, rows, 1);
+      const yRanges = yIdx.map((i) => ws.getRangeByIndexes(src.firstDataRow, i, rows, 1));
+      chart = ws.charts.add(info.id as Excel.ChartType, yRanges[0], Excel.ChartSeriesBy.columns);
+      const first = chart.series.getItemAt(0);
+      first.name = yNames[0];
+      first.setXAxisValues(xRange);
+      yIdx.slice(1).forEach((_, k) => {
+        const s = chart.series.add(yNames[k + 1]);
+        s.setValues(yRanges[k + 1]);
+        s.setXAxisValues(xRange);
+      });
+    } else {
+      const withHeader = src.hasHeader || !!helperSheet;
+      const top = withHeader ? src.firstDataRow - (src.hasHeader ? 1 : 0) : src.firstDataRow;
+      let block: Excel.Range;
+      if (!helperSheet) {
+        // Include the header row so Excel names the series.
+        block = ws.getRangeByIndexes(top, blockCols[0], rows + (src.hasHeader ? 1 : 0), blockCols.length);
+      } else {
+        // Linked copy (formulas pointing at the original cells) so the chart stays live.
+        const hs = ctx.workbook.worksheets.getItem(helperSheet);
+        hs.getRangeByIndexes(0, 0, 1, blockCols.length).values = [blockCols.map(nameOf)];
+        hs.getRangeByIndexes(0, 0, 1, blockCols.length).format.font.bold = true;
+        const CHUNK = 5000;
+        for (let start = 0; start < rows; start += CHUNK) {
+          const n = Math.min(CHUNK, rows - start);
+          const formulas = Array.from({ length: n }, (_, r) =>
+            blockCols.map((c) => `=${quoteSheet(src.sheetName)}!${a1(src.firstDataRow + start + r, c)}`)
+          );
+          hs.getRangeByIndexes(1 + start, 0, n, blockCols.length).formulas = formulas;
+          await ctx.sync();
+        }
+        hs.getRangeByIndexes(0, 0, rows + 1, blockCols.length).format.autofitColumns();
+        block = hs.getRangeByIndexes(0, 0, rows + 1, blockCols.length);
       }
-    } catch {
-      /* axis titles need ExcelApi 1.7+ – the chart is still fine without them */
+      chart = ws.charts.add(info.id as Excel.ChartType, block, Excel.ChartSeriesBy.columns);
     }
 
-    // Place it to the right of the data, aligned with the header row.
+    chart.title.text = title;
+    chart.title.visible = true;
     const lastCol = Math.max(...src.columns.map((c) => c.index));
     chart.setPosition(ws.getRangeByIndexes(Math.max(0, src.firstDataRow - (src.hasHeader ? 1 : 0)), lastCol + 2, 1, 1));
     chart.width = 520;
@@ -1121,6 +1147,31 @@ export async function plotColumns(req: PlotRequest): Promise<string> {
     chart.load("name");
     await ctx.sync();
     setSnapshot({ kind: "addedChart", sheetName: src.sheetName, chartName: chart.name, label: `chart "${title.slice(0, 40)}"` });
-    return title;
+
+    // Cosmetics in a separate batch: some chart types (treemap, funnel, map…) have no legend/axes,
+    // and a failure here must not lose the chart.
+    try {
+      chart.legend.visible = yIdx.length > 1 || !info.axes;
+      chart.legend.position = Excel.ChartLegendPosition.bottom;
+      await ctx.sync();
+    } catch {
+      /* no legend on this type */
+    }
+    if (info.axes) {
+      try {
+        if (info.useX) {
+          chart.axes.categoryAxis.title.text = xName;
+          chart.axes.categoryAxis.title.visible = true;
+        }
+        if (yIdx.length === 1) {
+          chart.axes.valueAxis.title.text = yNames[0];
+          chart.axes.valueAxis.title.visible = true;
+        }
+        await ctx.sync();
+      } catch {
+        /* axis titles not supported for this type */
+      }
+    }
+    return { title, helperSheet };
   });
 }
