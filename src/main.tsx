@@ -12,6 +12,30 @@ declare global {
 }
 const log = (type: string, msg: string) => window.__zeeLog?.(type, msg);
 
+/**
+ * After a new deploy, Excel may still run a cached copy of the old page whose code files no longer
+ * exist on the server. Detect that and reload once with a cache-busting parameter.
+ */
+const STALE_RE = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Unable to preload CSS/i;
+function reloadFresh(reason: string): boolean {
+  try {
+    const key = "zeeai.staleReload";
+    const last = Number(sessionStorage.getItem(key) ?? 0);
+    if (Date.now() - last < 30_000) return false; // already tried – don't loop
+    sessionStorage.setItem(key, String(Date.now()));
+  } catch {
+    /* storage blocked – still try once */
+  }
+  log("stale-build", reason);
+  const url = new URL(window.location.href);
+  url.searchParams.set("zeev", Date.now().toString(36));
+  window.location.replace(url.toString());
+  return true;
+}
+window.addEventListener("vite:preloadError", (e) => {
+  if (reloadFresh("vite:preloadError")) e.preventDefault();
+});
+
 /** Shows render-time crashes instead of a blank pane. */
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -19,6 +43,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     return { error };
   }
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
+    if (STALE_RE.test(error.message) && reloadFresh(error.message)) return;
     log("react-error", `${error.stack ?? error.message}\n${info.componentStack ?? ""}`);
   }
   render() {

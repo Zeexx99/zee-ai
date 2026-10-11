@@ -29,6 +29,20 @@
         window.__zeeShowError = show;
         window.addEventListener("error", function (e) {
           var t = e.target;
+          // A code file from an older deploy is gone (cached page): reload once with a cache-buster.
+          var src = t && t !== window && (t.src || t.href);
+          if (src && /\/assets\//.test(src)) {
+            try {
+              var last = Number(sessionStorage.getItem("zeeai.staleReload") || 0);
+              if (Date.now() - last > 30000) {
+                sessionStorage.setItem("zeeai.staleReload", String(Date.now()));
+                var u = new URL(location.href);
+                u.searchParams.set("zeev", Date.now().toString(36));
+                location.replace(u.toString());
+                return;
+              }
+            } catch (err) {}
+          }
           var msg = t && t !== window && (t.src || t.href)
             ? "Failed to load resource: " + (t.src || t.href)
             : (e.message || "error") + " @ " + (e.filename || "") + ":" + (e.lineno || "") + "\n" + ((e.error && e.error.stack) || "");

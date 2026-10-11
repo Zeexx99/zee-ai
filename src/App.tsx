@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -23,7 +23,8 @@ import { useChat } from "./hooks/useChat";
 import { ChatFeed } from "./components/ChatFeed";
 import { ChatInput } from "./components/ChatInput";
 import { QuickActions } from "./components/QuickActions";
-const SettingsDrawer = lazy(() => import("./components/SettingsDrawer").then((m) => ({ default: m.SettingsDrawer })));
+// Imported eagerly (not lazy-loaded): a separate chunk breaks when Excel holds a cached page from an older deploy.
+import { SettingsDrawer } from "./components/SettingsDrawer";
 import {
   ChartDialog,
   CleanDialog,
@@ -593,11 +594,7 @@ export default function App() {
           onStop={stop}
         />
 
-        {settingsOpen && (
-          <Suspense fallback={null}>
-            <SettingsDrawer open={settingsOpen} settings={settings} usage={usage} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />
-          </Suspense>
-        )}
+        {settingsOpen && <SettingsDrawer open={settingsOpen} settings={settings} usage={usage} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />}
         <CleanDialog open={cleanOpen} onClose={() => setCleanOpen(false)} onRun={onClean} />
         <ExtractDialog open={extractOpen} onClose={() => setExtractOpen(false)} onRun={onExtract} />
         <GenerateFormulaDialog open={genOpen} onClose={() => setGenOpen(false)} onRun={onGenerateFormula} />
