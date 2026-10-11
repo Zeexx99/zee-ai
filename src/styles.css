@@ -87,7 +87,21 @@ body.zee-light {
 .zee-quick {
   padding: 2px 6px;
   border-bottom: 1px solid var(--zee-border);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* Narrow pane: icon-only quick actions (names stay in tooltips), so the toolbar keeps one line. */
+@media (max-width: 440px) {
+  .zee-quick-label {
+    display: none;
+  }
+  .zee-quick button {
+    min-width: 0;
+    padding-left: 6px;
+    padding-right: 4px;
+  }
 }
 
 /* ---------------------------------------------------------------- feed */
@@ -603,6 +617,20 @@ body.zee-light {
   padding: 2px 4px;
 }
 
+.zee-draw-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.zee-draw-right {
+  flex: none;
+  font-size: 12px;
+  color: var(--zee-muted);
+}
+
 .zee-draw-label {
   display: inline-flex;
   align-items: baseline;
@@ -620,4 +648,10 @@ body.zee-light {
 .zee-draw-name {
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+
+.zee-grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px 10px;
 }

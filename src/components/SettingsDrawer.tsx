@@ -359,6 +359,11 @@ export function SettingsDrawer({ open, settings, usage, onChange, onClose }: Pro
             Type <code>=ZEE.ASK("Classify this failure as electrical or mechanical", B2)</code> in any cell and fill down. Answers are cached so recalculation doesn't cost
             extra.
           </p>
+          <p className="zee-muted">
+            Petroleum functions (instant, no AI): <code>ZEE.VOGEL</code>, <code>ZEE.VOGEL_QMAX</code>, <code>ZEE.PI</code>, <code>ZEE.RS</code>, <code>ZEE.PB</code>,{" "}
+            <code>ZEE.BO</code>, <code>ZEE.ARPS</code>, <code>ZEE.ARPS_CUM</code>, <code>ZEE.TDH</code>, <code>ZEE.HHP</code>, <code>ZEE.AFFINITY</code>,{" "}
+            <code>ZEE.SG_MIX</code>, <code>ZEE.CONVERT</code>. Type <code>=ZEE.</code> in a cell to see their arguments.
+          </p>
           <div className="zee-row">
             <Button
               size="small"
@@ -393,6 +398,16 @@ export function SettingsDrawer({ open, settings, usage, onChange, onClose }: Pro
           <p className="zee-muted">
             Current model: {modelLabel(settings.model)}. Quotas and billing are managed in Google AI Studio (API key) or the Google Cloud console (Vertex AI).
           </p>
+        </section>
+
+        <Divider />
+
+        <section>
+          <h3>About</h3>
+          <p className="zee-muted">
+            Zee AI {__ZEE_VERSION__} · built {new Date(__ZEE_BUILD__).toLocaleString()}
+          </p>
+          <p className="zee-muted">If this date is older than your last update, Excel is still showing a cached copy – close the pane and open it again.</p>
         </section>
       </DrawerBody>
     </OverlayDrawer>

@@ -1,6 +1,9 @@
 import { useState, type KeyboardEvent } from "react";
-import { Button, Switch, Textarea, Tooltip } from "@fluentui/react-components";
-import { Send20Filled, Stop20Filled } from "@fluentui/react-icons";
+import { Button, Menu, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Switch, Textarea, Tooltip } from "@fluentui/react-components";
+import { Bookmark20Regular, BookmarkAdd20Regular, Delete16Regular, Send20Filled, Stop20Filled } from "@fluentui/react-icons";
+import { loadPrompts, savePrompts } from "../services/promptStore";
+
+const short = (p: string) => (p.length > 70 ? `${p.slice(0, 68)}…` : p);
 
 interface Props {
   busy: boolean;
@@ -15,6 +18,11 @@ interface Props {
 
 export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, selectedAddress, onToggleSelection, onSend, onStop }: Props) {
   const [text, setText] = useState("");
+  const [prompts, setPrompts] = useState<string[]>(() => loadPrompts());
+  const updatePrompts = (list: string[]) => {
+    setPrompts(list);
+    savePrompts(list);
+  };
 
   const submit = () => {
     const t = text.trim();
@@ -57,6 +65,48 @@ export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, se
           resize="vertical"
           rows={2}
         />
+        <Menu positioning="above-end">
+          <MenuTrigger disableButtonEnhancement>
+            <Tooltip content="Saved prompts" relationship="label">
+              <Button appearance="subtle" icon={<Bookmark20Regular />} />
+            </Tooltip>
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              <MenuGroupHeader>Saved prompts – click to use</MenuGroupHeader>
+              {prompts.length === 0 && <MenuItem disabled>No saved prompts yet</MenuItem>}
+              {prompts.map((p, i) => (
+                <MenuItem key={i} title={p} onClick={() => setText(p)}>
+                  {short(p)}
+                </MenuItem>
+              ))}
+              <MenuDivider />
+              <MenuItem
+                icon={<BookmarkAdd20Regular />}
+                disabled={!text.trim() || prompts.includes(text.trim())}
+                onClick={() => updatePrompts([text.trim(), ...prompts])}
+              >
+                Save current text as a prompt
+              </MenuItem>
+              {prompts.length > 0 && (
+                <Menu>
+                  <MenuTrigger disableButtonEnhancement>
+                    <MenuItem icon={<Delete16Regular />}>Remove a prompt</MenuItem>
+                  </MenuTrigger>
+                  <MenuPopover>
+                    <MenuList>
+                      {prompts.map((p, i) => (
+                        <MenuItem key={i} title={p} onClick={() => updatePrompts(prompts.filter((_, j) => j !== i))}>
+                          {short(p)}
+                        </MenuItem>
+                      ))}
+                    </MenuList>
+                  </MenuPopover>
+                </Menu>
+              )}
+            </MenuList>
+          </MenuPopover>
+        </Menu>
         {busy ? (
           <Tooltip content="Stop generating" relationship="label">
             <Button appearance="secondary" icon={<Stop20Filled />} onClick={onStop} />

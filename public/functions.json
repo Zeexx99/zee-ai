@@ -5,12 +5,437 @@
       "name": "ASK",
       "description": "Ask Gemini and return a short answer in the cell. Example: =ZEE.ASK(\"Classify this failure\", B2)",
       "helpUrl": "https://aistudio.google.com/",
-      "result": { "type": "string", "dimensionality": "scalar" },
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
       "parameters": [
-        { "name": "prompt", "description": "What to ask or do, e.g. \"Extract the city\".", "type": "string", "dimensionality": "scalar" },
-        { "name": "context", "description": "Optional cells or ranges the prompt applies to.", "type": "any", "dimensionality": "matrix", "optional": true, "repeating": true }
+        {
+          "name": "prompt",
+          "description": "What to ask or do, e.g. \"Extract the city\".",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "context",
+          "description": "Optional cells or ranges the prompt applies to.",
+          "type": "any",
+          "dimensionality": "matrix",
+          "optional": true,
+          "repeating": true
+        }
       ],
-      "options": { "cancelable": true }
+      "options": {
+        "cancelable": true
+      }
+    },
+    {
+      "id": "VOGEL",
+      "name": "VOGEL",
+      "description": "Vogel IPR: liquid rate (bbl/d) at a flowing pressure, from reservoir pressure and one well test. =ZEE.VOGEL(Pr, Pwf, q_test, Pwf_test)",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "Pr",
+          "description": "Average reservoir pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pwf",
+          "description": "Flowing bottom-hole pressure to evaluate (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "q_test",
+          "description": "Test rate (bbl/d)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pwf_test",
+          "description": "Flowing pressure during the test (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "VOGEL_QMAX",
+      "name": "VOGEL_QMAX",
+      "description": "Vogel absolute open flow (q at Pwf = 0, bbl/d) from one well test. =ZEE.VOGEL_QMAX(Pr, q_test, Pwf_test)",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "Pr",
+          "description": "Average reservoir pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "q_test",
+          "description": "Test rate (bbl/d)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pwf_test",
+          "description": "Flowing pressure during the test (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "PI",
+      "name": "PI",
+      "description": "Productivity index J = q / (Pr − Pwf), bbl/d/psi.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "q",
+          "description": "Rate (bbl/d)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pr",
+          "description": "Reservoir pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pwf",
+          "description": "Flowing bottom-hole pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "RS",
+      "name": "RS",
+      "description": "Standing solution GOR Rs (scf/STB) at pressure p ≤ bubble point.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "p",
+          "description": "Pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "API",
+          "description": "Oil gravity (°API)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "PB",
+      "name": "PB",
+      "description": "Standing bubble-point pressure (psia) from solution GOR.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "Rs",
+          "description": "Solution GOR (scf/STB)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "API",
+          "description": "Oil gravity (°API)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "BO",
+      "name": "BO",
+      "description": "Standing oil FVF Bo (rb/STB) at pressure p ≤ bubble point.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "p",
+          "description": "Pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "API",
+          "description": "Oil gravity (°API)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "ARPS",
+      "name": "ARPS",
+      "description": "Arps decline rate q(t). Di is per time unit of t (e.g. 1/day if t in days).",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "qi",
+          "description": "Initial rate",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Di",
+          "description": "Initial nominal decline (per time unit)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "b",
+          "description": "Arps b (0 exponential, 1 harmonic)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "t",
+          "description": "Time since qi",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "ARPS_CUM",
+      "name": "ARPS_CUM",
+      "description": "Arps cumulative production from t = 0 to t (rate × time units).",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "qi",
+          "description": "Initial rate",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Di",
+          "description": "Initial nominal decline (per time unit)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "b",
+          "description": "Arps b (0 exponential, 1 harmonic)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "t",
+          "description": "Time since qi",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "TDH",
+      "name": "TDH",
+      "description": "ESP total dynamic head (ft) = (P_discharge − P_intake) / (0.433 × SG).",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "P_discharge",
+          "description": "Pump discharge pressure (psi)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "P_intake",
+          "description": "Pump intake pressure (psi)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "SG",
+          "description": "Fluid specific gravity",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "HHP",
+      "name": "HHP",
+      "description": "Hydraulic horsepower = q × ΔP / 58,771.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "q",
+          "description": "Rate (bbl/d)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "dP",
+          "description": "Pressure rise across the pump (psi)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "AFFINITY",
+      "name": "AFFINITY",
+      "description": "Affinity laws: scale a rate (Q ∝ f), head (H ∝ f²) or power (P ∝ f³) from one frequency to another.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "value",
+          "description": "Value at the first frequency",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "f_from",
+          "description": "Frequency of the value (Hz)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "f_to",
+          "description": "Target frequency (Hz)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "kind",
+          "description": "\"Q\", \"H\" or \"P\"",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "SG_MIX",
+      "name": "SG_MIX",
+      "description": "Liquid mixture specific gravity from water cut and oil API (gas ignored).",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "water_cut",
+          "description": "Water cut as a fraction 0–1",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "API",
+          "description": "Oil gravity (°API)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "water_SG",
+          "description": "Water SG (default 1.0)",
+          "type": "number",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "CONVERT",
+      "name": "CONVERT",
+      "description": "Oilfield unit conversion, e.g. =ZEE.CONVERT(A2, \"psi_bar\"). Ids: bbl_m3, m3_bbl, scf_m3, mscf_m3, mmscf_mm3, m3_scf, psi_bar, bar_psi, psi_kpa, kpa_psi, f_c, c_f, ft_m, m_ft, api_sg, sg_api, psift_sg, hp_kw, kw_hp",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "value",
+          "description": "Value to convert",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "conversion",
+          "description": "Conversion id, e.g. \"psi_bar\"",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
     }
   ]
 }

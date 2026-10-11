@@ -8,11 +8,18 @@ echo   Zee AI - apply the latest changes
 echo ============================================================
 echo.
 
-echo [1/4] Checking and building the code (about 30 seconds)...
+echo [1/4] Installing any new packages, running the tests and building (about 1 minute)...
+call npm install --no-audit --no-fund >> %LOG% 2>&1
+if errorlevel 1 (
+  echo NPM INSTALL FAILED >> %LOG%
+  echo [X] Installing packages failed - check your internet connection, or send update-log.txt to Claude.
+  pause
+  exit /b 1
+)
 call npm run build >> %LOG% 2>&1
 if errorlevel 1 (
   echo BUILD FAILED >> %LOG%
-  echo [X] Build failed - nothing was published. Send update-log.txt to Claude.
+  echo [X] Tests or build failed - nothing was published. Send update-log.txt to Claude.
   pause
   exit /b 1
 )
@@ -25,7 +32,7 @@ if not exist manifest.prod.xml goto localonly
 
 echo [2/4] Uploading to GitHub (your hosted add-in)...
 git add -A >> %LOG% 2>&1
-git commit -m "Dark mode, overwrite warning and fixes" >> %LOG% 2>&1
+git commit -m "Zee AI update %date% %time%" >> %LOG% 2>&1
 git push origin main >> %LOG% 2>&1
 if errorlevel 1 (
   echo PUSH FAILED >> %LOG%
@@ -55,6 +62,6 @@ echo cache cleared >> %LOG%
 echo [OK] Cache cleared.
 echo.
 echo [4/4] When the GitHub check is green, open Excel - Home tab - Zee AI.
-echo      You should see a moon/sun button in the Zee AI header.
+echo      Your latest changes should now be visible.
 echo.
 pause

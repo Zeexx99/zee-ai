@@ -12,7 +12,7 @@ import { a1, a1Range, columnLetter, quoteSheet, stripSheet, EXCEL_MAX_ROWS } fro
 import { cleanCell, type CleanOptions } from "../utils/clean";
 import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
-import { chartTypeInfo, checkYCount } from "../utils/chartTypes";
+import { chartTypeInfo, checkYCount, supportsLogScale, supportsSecondaryAxis } from "../utils/chartTypes";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -135,10 +135,18 @@ export async function undoLastChange(): Promise<string> {
   if (!snap) throw new ExcelUserError("Nothing to undo.");
   try {
     await run((ctx) => applyUndo(ctx, snap));
-  } finally {
-    undoStack.pop();
-    notifyUndo();
+  } catch (e) {
+    // Only forget the step when its target is gone; otherwise (protected sheet, cell in edit mode…)
+    // keep it so the user can fix the cause and press undo again.
+    if (e instanceof ExcelUserError && /no longer exists/i.test(e.message)) {
+      undoStack.pop();
+      notifyUndo();
+      throw new ExcelUserError(`Couldn't undo "${snap.label}": the sheet, chart or range no longer exists. It was removed from the undo list.`);
+    }
+    throw new ExcelUserError(`Couldn't undo "${snap.label}" – ${(e as Error).message} Fix that (e.g. leave cell edit mode or unprotect the sheet) and press undo again.`);
   }
+  undoStack.pop();
+  notifyUndo();
   return snap.label;
 }
 
@@ -1066,12 +1074,17 @@ export interface PlotRequest {
   /** Excel.ChartType value from utils/chartTypes. */
   chartType: string;
   title?: string;
+  /** Y columns to draw against a right-hand axis (2-D series charts only). */
+  secondaryYIndexes?: number[];
+  /** Logarithmic value axes (e.g. production rate on a semi-log decline plot). */
+  logLeft?: boolean;
+  logRight?: boolean;
 }
 
 const HELPER_MAX_ROWS = 50_000;
 
 /** Chart several Y columns against one X column, in any Excel chart type. */
-export async function plotColumns(req: PlotRequest): Promise<{ title: string; helperSheet?: string }> {
+export async function plotColumns(req: PlotRequest): Promise<{ title: string; helperSheet?: string; warnings: string[] }> {
   const { source: src } = req;
   const info = chartTypeInfo(req.chartType);
   const yIdx = [...req.yIndexes].sort((a, b) => a - b); // sheet order (matters for stock charts)
@@ -1172,6 +1185,100 @@ export async function plotColumns(req: PlotRequest): Promise<{ title: string; he
         /* axis titles not supported for this type */
       }
     }
-    return { title, helperSheet };
+    // Right-hand axis and log scales (newer chart APIs – report instead of failing).
+    const warnings: string[] = [];
+    const secondary = supportsSecondaryAxis(info) ? yIdx.filter((i) => req.secondaryYIndexes?.includes(i)) : [];
+    if (secondary.length && secondary.length < yIdx.length) {
+      try {
+        yIdx.forEach((i, k) => {
+          if (secondary.includes(i)) chart.series.getItemAt(k).axisGroup = Excel.ChartAxisGroup.secondary;
+        });
+        await ctx.sync();
+        const right = chart.axes.getItem(Excel.ChartAxisType.value, Excel.ChartAxisGroup.secondary);
+        right.title.text = secondary.map(nameOf).join(", ");
+        right.title.visible = true;
+        const left = chart.axes.valueAxis;
+        left.title.text = yIdx.filter((i) => !secondary.includes(i)).map(nameOf).join(", ");
+        left.title.visible = true;
+        await ctx.sync();
+      } catch {
+        warnings.push("right-hand axis needs a newer Excel version");
+      }
+    }
+    if (supportsLogScale(info) && (req.logLeft || (req.logRight && secondary.length))) {
+      try {
+        if (req.logLeft) chart.axes.valueAxis.scaleType = Excel.ChartAxisScaleType.logarithmic;
+        if (req.logRight && secondary.length && secondary.length < yIdx.length)
+          chart.axes.getItem(Excel.ChartAxisType.value, Excel.ChartAxisGroup.secondary).scaleType = Excel.ChartAxisScaleType.logarithmic;
+        await ctx.sync();
+      } catch {
+        warnings.push("log scale could not be applied (zero/negative values or older Excel)");
+      }
+    }
+    return { title, helperSheet, warnings };
+  });
+}
+
+/** Raw values of chosen columns over the data rows of a PlotSource (one array per column). */
+export async function readSourceColumns(src: PlotSource, indices: number[]): Promise<unknown[][]> {
+  const rows = src.lastDataRow - src.firstDataRow + 1;
+  if (rows < 1) return indices.map(() => []);
+  if (rows * indices.length > 500_000) throw new ExcelUserError("Too many rows – select at most about 100,000 rows.");
+  return run(async (ctx) => {
+    const ws = ctx.workbook.worksheets.getItem(src.sheetName);
+    const ranges = indices.map((i) => {
+      const r = ws.getRangeByIndexes(src.firstDataRow, i, rows, 1);
+      r.load("values");
+      return r;
+    });
+    await ctx.sync();
+    return ranges.map((r) => r.values.map((row) => row[0]));
+  });
+}
+
+export interface ScatterSeriesSpec {
+  name: string;
+  /** Addresses on `sheetName` (no sheet prefix), single column each. */
+  x: string;
+  y: string;
+  style: "points" | "line" | "smooth";
+}
+
+/** Scatter chart built from explicit series (e.g. pump curve + operating points). Not undo-tracked (lives on a report sheet). */
+export async function createScatterSeriesChart(sheetName: string, title: string, series: ScatterSeriesSpec[], anchor: string, axisTitles?: { x?: string; y?: string }): Promise<void> {
+  if (!series.length) return;
+  const STYLE: Record<ScatterSeriesSpec["style"], string> = { points: "XYScatter", line: "XYScatterLinesNoMarkers", smooth: "XYScatterSmoothNoMarkers" };
+  await run(async (ctx) => {
+    const ws = ctx.workbook.worksheets.getItem(sheetName);
+    const chart = ws.charts.add(STYLE[series[0].style] as Excel.ChartType, ws.getRange(series[0].y), Excel.ChartSeriesBy.columns);
+    const first = chart.series.getItemAt(0);
+    first.name = series[0].name;
+    first.setXAxisValues(ws.getRange(series[0].x));
+    const added = series.slice(1).map((s) => {
+      const ser = chart.series.add(s.name);
+      ser.setValues(ws.getRange(s.y));
+      ser.setXAxisValues(ws.getRange(s.x));
+      return ser;
+    });
+    chart.title.text = title;
+    chart.setPosition(anchor);
+    chart.width = 520;
+    chart.height = 320;
+    await ctx.sync();
+    try {
+      added.forEach((ser, k) => (ser.chartType = STYLE[series[k + 1].style] as Excel.ChartType));
+      chart.legend.position = Excel.ChartLegendPosition.bottom;
+      if (axisTitles?.x) {
+        chart.axes.categoryAxis.title.text = axisTitles.x;
+        chart.axes.categoryAxis.title.visible = true;
+      }
+      if (axisTitles?.y) {
+        chart.axes.valueAxis.title.text = axisTitles.y;
+        chart.axes.valueAxis.title.visible = true;
+      }
+      await ctx.sync();
+    } catch {
+      /* cosmetic – older Excel */
+    }
   });
 }

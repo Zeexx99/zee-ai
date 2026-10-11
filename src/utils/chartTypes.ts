@@ -155,6 +155,15 @@ export const CHART_TYPES: ChartTypeInfo[] = [
   R("RegionMap", "Filled map", "Map", { maxY: 1, hint: "X must hold country/region/state names. Tick one Y column. Needs an internet connection." }),
 ];
 
+/** 2-D series charts can put series on a right-hand (secondary) Y axis and use a log value axis. */
+export function supportsSecondaryAxis(info: ChartTypeInfo): boolean {
+  return info.mode === "series" && ["Column", "Bar", "Line", "Area", "X Y (scatter) & bubble"].includes(info.group) && !/^3D/.test(info.id);
+}
+
+export function supportsLogScale(info: ChartTypeInfo): boolean {
+  return info.axes && !/Stacked100/.test(info.id) && !/^3D|^Cylinder|^Cone|^Pyramid/.test(info.id);
+}
+
 export const CHART_GROUPS: string[] = Array.from(new Set(CHART_TYPES.map((t) => t.group)));
 
 export function chartTypeInfo(id: string): ChartTypeInfo {

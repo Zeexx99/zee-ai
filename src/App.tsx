@@ -3,6 +3,11 @@ import {
   Badge,
   Button,
   FluentProvider,
+  Menu,
+  MenuItem,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
   MessageBar,
   MessageBarActions,
   MessageBarBody,
@@ -16,7 +21,7 @@ import {
   useToastController,
   type ToastIntent,
 } from "@fluentui/react-components";
-import { Add20Regular, ArrowUndo20Regular, Settings20Regular, WeatherMoon20Regular, WeatherSunny20Regular } from "@fluentui/react-icons";
+import { Add20Regular, ArrowDownload20Regular, ArrowUndo20Regular, Copy20Regular, Settings20Regular, Table20Regular, WeatherMoon20Regular, WeatherSunny20Regular } from "@fluentui/react-icons";
 
 import { darkTheme, lightTheme, useAutoDark, useBodyThemeClass } from "./theme";
 import { useChat } from "./hooks/useChat";
@@ -31,15 +36,17 @@ import {
   ConfirmDialog,
   DeclineCurveDialog,
   DrawDialog,
+  EspDialog,
   ExtractDialog,
   GenerateFormulaDialog,
   UnitDialog,
   type ConfirmState,
   type DcaChoice,
   type DrawChoice,
+  type EspDialogChoice,
   type ExtractChoice,
 } from "./components/Dialogs";
-import { InsertActionsContext, type InsertActions } from "./components/insertActions";
+import { InsertActionsContext, copyText, type InsertActions } from "./components/insertActions";
 
 import { isConfigured, loadSettings, modelLabel, saveSettings, type ZeeSettings } from "./services/settingsService";
 import {
@@ -51,6 +58,9 @@ import {
   getWorkbookOverview,
   insertConvertedColumns,
   formatSelectionAsTable,
+  addSheet,
+  formatRangeAt,
+  writeBlock,
   getPlotSource,
   plotColumns,
   type PlotSource,
@@ -70,7 +80,7 @@ import {
   type AggregateFn,
   type ChartKind,
 } from "./services/excelService";
-import { ESP_PROMPT, getSelectionHeaders, runDeclineCurve, runProductionQc } from "./services/petroActions";
+import { ESP_PROMPT, getSelectionHeaders, runDeclineByWell, runDeclineCurve, runEspAnalysis, runProductionQc } from "./services/petroActions";
 import { UNIT_CONVERSIONS } from "./utils/petro";
 import { estimateTokens, generateJson, type Usage } from "./services/geminiService";
 import { explainFormulaPrompt, generateFormulaPrompt, transformPrompt, TRANSFORM_SYSTEM_PROMPT } from "./services/prompts";
@@ -286,6 +296,41 @@ export default function App() {
     [respondToApproval, toast, toastError, withOverwrite]
   );
 
+  /* ------------------------------------------------------------ export chat */
+  const chatAsText = useCallback(
+    () =>
+      messages
+        .filter((m) => m.status !== "streaming")
+        .map((m) => {
+          const who = m.role === "user" ? "You" : `Zee AI${m.mode === "agent" ? " (agent)" : ""}`;
+          const ctx = m.contextLabel ? ` [${m.contextLabel}]` : "";
+          const acts = m.actions?.length ? `\n\nActions:\n${m.actions.map((a) => `- ${a.status}: ${a.description}`).join("\n")}` : "";
+          return `### ${who}${ctx}\n\n${m.text}${acts}`;
+        })
+        .join("\n\n---\n\n"),
+    [messages]
+  );
+  const exportCopy = async () => {
+    if (await copyText(chatAsText())) toast("success", "Chat copied", "Paste it into Word, Teams, an email or a text file.");
+    else toast("error", "Couldn't copy", "The clipboard is blocked here – use Export to a new sheet instead.");
+  };
+  const exportSheet = async () => {
+    try {
+      const sheet = await addSheet("Chat export");
+      const rows: Cell[][] = [
+        ["#", "From", "Context", "Message"],
+        ...messages
+          .filter((m) => m.status !== "streaming")
+          .map((m, i): Cell[] => [i + 1, m.role === "user" ? "You" : "Zee AI", m.contextLabel ?? "", m.text.slice(0, 32000)]),
+      ];
+      await writeBlock(sheet, "A1", rows, { header: true });
+      await formatRangeAt(`D2:D${rows.length}`, { wrap: true }, sheet);
+      toast("success", "Chat exported", `${rows.length - 1} messages → sheet "${sheet}"`);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
   /* ------------------------------------------------------------ quick actions */
   const [cleanOpen, setCleanOpen] = useState(false);
   const [extractOpen, setExtractOpen] = useState(false);
@@ -445,8 +490,13 @@ export default function App() {
 
   const onDeclineCurve = async (c: DcaChoice) => {
     setDcaHeaders(null);
-    setJob({ text: "Fitting decline curves…" });
+    setJob({ text: c.wellColumn !== undefined ? "Fitting decline curves for every well…" : "Fitting decline curves…" });
     try {
+      if (c.wellColumn !== undefined) {
+        const w = await runDeclineByWell(c);
+        toast(w.failed ? "warning" : "success", `Fitted ${w.fitted} of ${w.wells} wells`, `${w.failed ? `${w.failed} wells had fewer than 3 valid points · ` : ""}summary → sheet "${w.sheet}"`);
+        return;
+      }
       const r = await runDeclineCurve(c);
       const b = r.best;
       toast(
@@ -454,6 +504,29 @@ export default function App() {
         `Best fit: ${b.model} (R² ${b.r2.toFixed(3)})`,
         `qi ${b.qi.toPrecision(4)}, Di ${b.di.toPrecision(3)}, b ${b.b.toFixed(2)} · ${r.pointsUsed} points${r.dropped ? `, ${r.dropped} skipped` : ""} → sheet "${r.sheet}"`
       );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const [espSource, setEspSource] = useState<PlotSource | null>(null);
+  const openEspAnalysis = async () => {
+    try {
+      setEspSource(await getPlotSource());
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const onEspAnalysis = async (c: EspDialogChoice) => {
+    const src = espSource;
+    setEspSource(null);
+    if (!src) return;
+    setJob({ text: "Analysing ESP data…" });
+    try {
+      const r = await runEspAnalysis({ source: src, columns: c.columns, options: c.options, curveAddress: c.curveAddress });
+      toast(r.status.startsWith("OK") ? "success" : "warning", r.status, `${r.rows} rows analysed, ${r.flagged} flagged → sheet "${r.sheet}"`);
     } catch (e) {
       toastError(e);
     } finally {
@@ -506,11 +579,20 @@ export default function App() {
     if (!src) return;
     setJob({ text: "Drawing chart…" });
     try {
-      const r = await plotColumns({ source: src, xIndex: c.xIndex, yIndexes: c.yIndexes, chartType: c.chartType, title: c.title });
+      const r = await plotColumns({
+        source: src,
+        xIndex: c.xIndex,
+        yIndexes: c.yIndexes,
+        chartType: c.chartType,
+        title: c.title,
+        secondaryYIndexes: c.secondaryYIndexes,
+        logLeft: c.logLeft,
+        logRight: c.logRight,
+      });
       toast(
-        "success",
+        r.warnings.length ? "warning" : "success",
         "Chart created",
-        `${r.title} on ${src.sheetName}${r.helperSheet ? ` · linked data copied to sheet "${r.helperSheet}" (this chart type needs adjacent columns)` : ""}`
+        `${r.title} on ${src.sheetName}${r.helperSheet ? ` · linked data copied to sheet "${r.helperSheet}" (this chart type needs adjacent columns)` : ""}${r.warnings.length ? ` · Note: ${r.warnings.join("; ")}` : ""}`
       );
     } catch (e) {
       toastError(e);
@@ -540,7 +622,15 @@ export default function App() {
           <img src="assets/icon-32.png" alt="" width={22} height={22} />
           <span className="zee-title">Zee AI</span>
           <Tooltip content="Change model in Settings" relationship="description">
-            <Badge appearance="tint" size="small" className="zee-model-badge" onClick={() => setSettingsOpen(true)}>
+            <Badge
+              appearance="tint"
+              size="small"
+              className="zee-model-badge"
+              role="button"
+              tabIndex={0}
+              onClick={() => setSettingsOpen(true)}
+              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setSettingsOpen(true)}
+            >
               {modelLabel(settings.model)}
             </Badge>
           </Tooltip>
@@ -558,6 +648,23 @@ export default function App() {
               onClick={() => updateSettings({ theme: dark ? "light" : "dark" })}
             />
           </Tooltip>
+          <Menu>
+            <MenuTrigger disableButtonEnhancement>
+              <Tooltip content="Export chat" relationship="label">
+                <Button appearance="subtle" size="small" icon={<ArrowDownload20Regular />} disabled={!messages.length} />
+              </Tooltip>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                <MenuItem icon={<Copy20Regular />} onClick={exportCopy}>
+                  Copy chat as text
+                </MenuItem>
+                <MenuItem icon={<Table20Regular />} onClick={exportSheet} disabled={!inExcel}>
+                  Export chat to a new sheet
+                </MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
           <Tooltip content="New chat" relationship="label">
             <Button appearance="subtle" size="small" icon={<Add20Regular />} onClick={clear} disabled={!messages.length} />
           </Tooltip>
@@ -597,6 +704,7 @@ export default function App() {
           onProductionQc={onProductionQc}
           onUnits={() => setUnitOpen(true)}
           onEspCheck={onEspCheck}
+          onEspAnalysis={openEspAnalysis}
           onDraw={openDraw}
         />
 
@@ -635,6 +743,12 @@ export default function App() {
         <ChartDialog open={chartOpen} onClose={() => setChartOpen(false)} onRun={onChart} />
         <UnitDialog open={unitOpen} onClose={() => setUnitOpen(false)} onRun={onUnits} />
         <DeclineCurveDialog open={!!dcaHeaders} headers={dcaHeaders ?? []} onClose={() => setDcaHeaders(null)} onRun={onDeclineCurve} />
+        <EspDialog
+          source={espSource}
+          onClose={() => setEspSource(null)}
+          onRun={onEspAnalysis}
+          onPickSelection={() => getSelectedAddress().catch(() => null)}
+        />
         <DrawDialog source={plotSource} onClose={() => setPlotSource(null)} onRun={onDraw} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />

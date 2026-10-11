@@ -8,6 +8,23 @@
  */
 import { loadSettings, isConfigured } from "../services/settingsService";
 import { generateText, GeminiError } from "../services/geminiService";
+import {
+  FormulaInputError,
+  affinity,
+  arpsCumAt,
+  arpsRateAt,
+  convertUnits,
+  hydraulicHp,
+  liquidSg,
+  productivityIndex,
+  pumpTdh,
+  standingBo,
+  standingPb,
+  standingRs,
+  vogelQmax,
+  vogelRate,
+  type AffinityKind,
+} from "../utils/petroFormulas";
 
 declare const CustomFunctions:
   | {
@@ -130,10 +147,49 @@ async function ask(prompt: string, ...rest: unknown[]): Promise<string> {
   }
 }
 
+/** Wrap a pure formula: bad input becomes #NUM! with the reason as the cell's error tooltip. */
+function numeric(fn: (...args: any[]) => number) {
+  return (...args: unknown[]) => {
+    try {
+      const r = fn(...args);
+      if (!Number.isFinite(r)) throw new FormulaInputError("Result is not a finite number – check the inputs.");
+      return r;
+    } catch (e) {
+      const msg = (e as Error).message ?? String(e);
+      if (typeof CustomFunctions !== "undefined") throw new CustomFunctions.Error(CustomFunctions.ErrorCode.invalidNumber ?? "#NUM!", msg.slice(0, 250));
+      throw e;
+    }
+  };
+}
+
+/** Petroleum worksheet functions (no AI, instant, free). Metadata lives in public/functions.json. */
+const PETRO_FUNCTIONS: Record<string, (...args: any[]) => unknown> = {
+  VOGEL: numeric((pr: number, pwf: number, qTest: number, pwfTest: number) => vogelRate(pr, pwf, qTest, pwfTest)),
+  VOGEL_QMAX: numeric((pr: number, qTest: number, pwfTest: number) => vogelQmax(pr, qTest, pwfTest)),
+  PI: numeric((q: number, pr: number, pwf: number) => productivityIndex(q, pr, pwf)),
+  RS: numeric((p: number, t: number, api: number, gasSg: number) => standingRs(p, t, api, gasSg)),
+  PB: numeric((rs: number, t: number, api: number, gasSg: number) => standingPb(rs, t, api, gasSg)),
+  BO: numeric((p: number, t: number, api: number, gasSg: number) => standingBo(standingRs(p, t, api, gasSg), t, api, gasSg)),
+  ARPS: numeric((qi: number, di: number, b: number, t: number) => arpsRateAt(qi, di, b, t)),
+  ARPS_CUM: numeric((qi: number, di: number, b: number, t: number) => arpsCumAt(qi, di, b, t)),
+  TDH: numeric((pd: number, pi: number, sg: number) => pumpTdh(pd, pi, sg)),
+  HHP: numeric((q: number, dp: number) => hydraulicHp(q, dp)),
+  AFFINITY: numeric((v: number, f1: number, f2: number, kind: string) => affinity(v, f1, f2, (kind || "Q") as AffinityKind)),
+  SG_MIX: numeric((wc: number, api: number, waterSg?: number | null) => liquidSg(wc, api, waterSg ?? 1)),
+  CONVERT: numeric((v: number, id: string) => convertUnits(v, id)),
+};
+
 let registered = false;
 export function registerCustomFunctions() {
   if (registered || typeof CustomFunctions === "undefined") return;
   try {
+    for (const [id, fn] of Object.entries(PETRO_FUNCTIONS)) {
+      try {
+        CustomFunctions.associate(id, fn);
+      } catch {
+        /* metadata not loaded yet for this id (old cached functions.json) – skip */
+      }
+    }
     CustomFunctions.associate("ASK", ask);
     registered = true;
   } catch {

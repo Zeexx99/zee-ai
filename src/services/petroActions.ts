@@ -2,8 +2,21 @@
  * Petroleum quick actions built on the pure math in utils/petro.ts and the Excel helpers.
  * Results go to a NEW sheet (never overwriting data) and are undoable (delete sheet).
  */
-import { addSheet, createChart, formatRangeAt, readSelectionBlock, writeBlock, ExcelUserError, type SelectionBlock } from "./excelService";
-import { arpsCum, arpsRate, arpsTimeToRate, fitArps, prepareDca, qcAnalyze, type ArpsFit } from "../utils/petro";
+import {
+  addSheet,
+  createChart,
+  createScatterSeriesChart,
+  formatRangeAt,
+  readRangeValues,
+  readSelectionBlock,
+  readSourceColumns,
+  writeBlock,
+  ExcelUserError,
+  type PlotSource,
+  type SelectionBlock,
+} from "./excelService";
+import { analyzeEsp, parseCurve, type EspOptions } from "../utils/espAnalysis";
+import { arpsCum, arpsRate, arpsTimeToRate, fitArps, fitArpsByGroup, prepareDca, qcAnalyze, type ArpsFit } from "../utils/petro";
 import { a1, quoteSheet } from "../utils/a1";
 import type { Cell } from "../utils/markdown";
 
@@ -28,7 +41,87 @@ export interface DcaOptions {
   timeColumn: number;
   forecastPeriods: number; // extra periods beyond last data point (in typical step units)
   economicLimit?: number;
+  /** Optional well / group column: fit every well separately and write a summary table. */
+  wellColumn?: number;
 }
+
+export interface DcaByWellResult {
+  sheet: string;
+  wells: number;
+  fitted: number;
+  failed: number;
+}
+
+/** Decline-curve fit for every well in the selection; one summary row per well. */
+export async function runDeclineByWell(o: DcaOptions): Promise<DcaByWellResult> {
+  if (o.wellColumn === undefined) throw new ExcelUserError("Choose the well column.");
+  const blk: SelectionBlock = await readSelectionBlock(200_000);
+  const header = hasHeaderRow(blk.values);
+  const body = header ? blk.values.slice(1) : blk.values;
+  const bodyText = header ? blk.text.slice(1) : blk.text;
+  const rawT = body.map((r) => r[o.timeColumn]);
+  const dates = looksLikeDates(rawT, bodyText.map((r) => r[o.timeColumn]));
+  const fits = fitArpsByGroup(
+    body.map((r) => r[o.wellColumn as number]),
+    rawT,
+    body.map((r) => r[o.rateColumn])
+  );
+  if (!fits.length) throw new ExcelUserError("The well column is empty.");
+  const unit = dates ? "day" : "time unit";
+  const rateName = header ? String(blk.values[0][o.rateColumn]).trim() || "Rate" : "Rate";
+  const lim = o.economicLimit;
+
+  const sheet = await addSheet(`DCA by well`);
+  const top: Cell[][] = [
+    [`Decline curve analysis by well – ${rateName}`],
+    [`Source: ${blk.address} · ${fits.length} wells · Di per ${unit}${lim ? ` · economic limit ${lim}` : ""}`],
+  ];
+  await writeBlock(sheet, "A1", top);
+  await formatRangeAt("A1", { bold: true }, sheet);
+  const table: Cell[][] = [
+    [
+      "Well",
+      "Points",
+      "Skipped",
+      "Best model",
+      "qi",
+      `Di (1/${unit})`,
+      "b",
+      "R²",
+      dates ? "Annual decline (%)" : "",
+      dates ? "First date" : "First time",
+      lim ? `Time to limit (${unit}s)` : "",
+      lim ? "EUR from first point" : "",
+      "Note",
+    ],
+    ...fits.map((g): Cell[] => {
+      const f = g.best;
+      if (!f) return [g.group, g.points, g.dropped, "", "", "", "", "", "", g.t0 || "", "", "", g.error ?? "not fitted"];
+      const tl = lim ? arpsTimeToRate(f, lim) : NaN;
+      return [
+        g.group,
+        g.points,
+        g.dropped,
+        f.model,
+        +f.qi.toPrecision(6),
+        +f.di.toPrecision(5),
+        +f.b.toFixed(3),
+        +f.r2.toFixed(4),
+        dates ? +((1 - arpsRate(f, 365) / f.qi) * 100).toFixed(1) : "",
+        g.t0,
+        lim ? (Number.isFinite(tl) ? +tl.toFixed(1) : "never") : "",
+        lim ? (Number.isFinite(tl) ? +arpsCum(f, tl).toPrecision(6) : "unbounded") : "",
+        f.r2 < 0.7 ? "low R² – check data / pick a period" : "",
+      ];
+    }),
+  ];
+  await writeBlock(sheet, "A4", table, { header: true });
+  if (dates) await formatRangeAt(`J5:J${4 + fits.length}`, { numberFormat: "yyyy-mm-dd" }, sheet);
+  await formatRangeAt(`A4:M4`, { autofit: true }, sheet);
+  const fitted = fits.filter((g) => g.best).length;
+  return { sheet, wells: fits.length, fitted, failed: fits.length - fitted };
+}
+
 
 export interface DcaResult {
   sheet: string;
@@ -155,3 +248,157 @@ Do the following where the data allows (state which columns you used):
 4. Flag gas interference / gas lock (PIP near or below bubble point, amp fluctuation, low efficiency), scale/plugging, high motor temperature, current imbalance, underload/overload trips.
 5. Summarise as: **Status**, **Key findings** (bullets with numbers), **Likely causes**, **Recommended actions** (e.g. frequency change, choke, gas handling, workover).
 If key data is missing, list exactly which measurements are needed. Put any computed table in a markdown table so it can be inserted.`;
+
+/* ================================================================ ESP analysis (calculated, no AI) */
+
+export interface EspColumns {
+  rate: number;
+  pip: number;
+  pd: number;
+  hz: number;
+  amps?: number;
+  waterCut?: number;
+  /** Date / time / well-test id column used as the first report column and the trend chart X. */
+  x?: number;
+}
+
+export interface EspChoice {
+  source: PlotSource;
+  columns: EspColumns;
+  options: Omit<EspOptions, "curve">;
+  /** Optional pump curve range: two columns, rate (bbl/d) and head at the base frequency, e.g. "Curves!A2:B40". */
+  curveAddress?: string;
+}
+
+export interface EspResult {
+  sheet: string;
+  status: string;
+  rows: number;
+  flagged: number;
+}
+
+export async function runEspAnalysis(c: EspChoice): Promise<EspResult> {
+  const curve = c.curveAddress?.trim() ? parseCurve(await readRangeValues(c.curveAddress.trim())) : undefined;
+  if (c.curveAddress?.trim() && (!curve || curve.length < 2)) throw new ExcelUserError(`No pump curve found in ${c.curveAddress}: it needs two columns – rate and head – with at least 2 numeric rows.`);
+  const opts: EspOptions = { ...c.options, curve };
+
+  const k = c.columns;
+  const order = [k.rate, k.pip, k.pd, k.hz, k.amps ?? -1, k.waterCut ?? -1, k.x ?? -1];
+  const wanted = order.filter((i) => i >= 0);
+  const data = await readSourceColumns(c.source, wanted);
+  const col = (i: number | undefined) => (i === undefined || i < 0 ? null : data[wanted.indexOf(i)]);
+  const n = data[0]?.length ?? 0;
+  const [rate, pip, pd, hz, amps, wc, xs] = [k.rate, k.pip, k.pd, k.hz, k.amps, k.waterCut, k.x].map(col);
+  const inputs = Array.from({ length: n }, (_, i) => ({
+    rate: rate![i],
+    pip: pip![i],
+    pd: pd![i],
+    hz: hz![i],
+    amps: amps?.[i],
+    waterCut: wc?.[i],
+  }));
+  const { rows, summary } = analyzeEsp(inputs, opts);
+  if (!summary.validRows) throw new ExcelUserError("No row had numeric rate, intake and discharge pressure and frequency. Check the column choices.");
+
+  const nameOf = (i: number | undefined) => (i === undefined ? "" : c.source.columns.find((cc) => cc.index === i)?.name ?? "");
+  const headUnit = opts.stages && opts.stages > 1 ? "ft/stage" : "ft";
+  const base = `${opts.baseHz} Hz`;
+  const sheet = await addSheet("ESP Analysis");
+
+  const S = summary;
+  const top: Cell[][] = [
+    ["ESP performance analysis (calculated)", ""],
+    [`Source: ${c.source.sheetName}!${c.source.address}`, ""],
+    ["Status", S.status],
+    ["Rows analysed", `${S.validRows} of ${S.rows}`],
+    ["In range / downthrust / upthrust", curve || (opts.minRate !== undefined && opts.maxRate !== undefined) ? `${S.inRange} / ${S.downthrust} / ${S.upthrust}` : "n/a (no curve or range given)"],
+    ["Head vs curve – average / latest (%)", S.avgHeadDeviationPct === null ? "n/a (no curve)" : `${S.avgHeadDeviationPct} / ${S.latestHeadDeviationPct}`],
+    ["Average motor load (%)", S.avgMotorLoadPct ?? "n/a (no amps / nameplate)"],
+    ["Rows with flags", S.flaggedRows],
+    ...Object.entries(S.flagCounts).map(([f, cnt]): Cell[] => [`  ${f}`, cnt]),
+    [`Assumptions: SG ${opts.api !== undefined && k.waterCut !== undefined ? `from water cut + ${opts.api} °API` : opts.sg}; base ${base}; ${opts.stages ? `${opts.stages} stages` : "curve head = total pump head"}; head-loss flag at −${opts.degradationPct} %.`, ""],
+  ];
+  await writeBlock(sheet, "A1", top);
+  await formatRangeAt("A1", { bold: true }, sheet);
+  await formatRangeAt(`A3:A${top.length - 1}`, { bold: true }, sheet);
+
+  const headerRow = top.length + 2; // 1-based
+  const table: Cell[][] = [
+    [
+      nameOf(k.x) || "Row",
+      "Rate (bbl/d)",
+      "Freq (Hz)",
+      "PIP (psi)",
+      "Pdis (psi)",
+      "ΔP (psi)",
+      "SG",
+      "TDH (ft)",
+      `Rate @ ${base}`,
+      `Head @ ${base} (${headUnit})`,
+      `Curve head (${headUnit})`,
+      "Head vs curve (%)",
+      "HHP",
+      "Motor load (%)",
+      "Range",
+      "Flags",
+    ],
+    ...rows.map((r, i): Cell[] => [
+      xs ? ((xs[i] as Cell) ?? "") : i + 1,
+      r.rate ?? "",
+      r.hz ?? "",
+      r.pip ?? "",
+      r.pd ?? "",
+      r.dp ?? "",
+      r.sg ?? "",
+      r.tdh ?? "",
+      r.rateBase ?? "",
+      r.headBase ?? "",
+      r.headCurve ?? "",
+      r.headDeviationPct ?? "",
+      r.hhp ?? "",
+      r.motorLoadPct ?? "",
+      r.range,
+      r.flags.join("; "),
+    ]),
+  ];
+  await writeBlock(sheet, `A${headerRow}`, table, { header: true });
+  const lastRow = headerRow + rows.length;
+  const xText = xs ? xs.find((v) => v !== "" && v !== null) : undefined;
+  if (typeof xText === "number" && xText > 3000 && xText < 120000 && /date|day|time/i.test(nameOf(k.x))) {
+    await formatRangeAt(`A${headerRow + 1}:A${lastRow}`, { numberFormat: "yyyy-mm-dd" }, sheet);
+  }
+
+  // Pump curve table + charts to the right of the table.
+  const anchorCol = "R";
+  if (curve) {
+    const curveTop = headerRow;
+    await writeBlock(sheet, `${anchorCol}${curveTop}`, [[`Curve rate @ ${base}`, `Curve head (${headUnit})`], ...curve.map((p): Cell[] => [p.q, p.h])], { header: true });
+    const cEnd = curveTop + curve.length;
+    await createScatterSeriesChart(
+      sheet,
+      "Operating points on the pump curve",
+      [
+        { name: `Catalog curve @ ${base}`, x: `R${curveTop + 1}:R${cEnd}`, y: `S${curveTop + 1}:S${cEnd}`, style: "smooth" },
+        { name: "Measured (corrected)", x: `I${headerRow + 1}:I${lastRow}`, y: `J${headerRow + 1}:J${lastRow}`, style: "points" },
+      ],
+      "U2",
+      { x: `Rate @ ${base} (bbl/d)`, y: `Head (${headUnit})` }
+    ).catch(() => undefined);
+    await createScatterSeriesChart(
+      sheet,
+      "Head vs catalog curve (%) – wear trend",
+      [{ name: "Head vs curve (%)", x: `A${headerRow + 1}:A${lastRow}`, y: `L${headerRow + 1}:L${lastRow}`, style: "line" }],
+      "U24",
+      { x: nameOf(k.x) || "Row", y: "%" }
+    ).catch(() => undefined);
+  } else {
+    await createScatterSeriesChart(
+      sheet,
+      "TDH trend",
+      [{ name: "TDH (ft)", x: `A${headerRow + 1}:A${lastRow}`, y: `H${headerRow + 1}:H${lastRow}`, style: "line" }],
+      "R2",
+      { x: nameOf(k.x) || "Row", y: "TDH (ft)" }
+    ).catch(() => undefined);
+  }
+  return { sheet, status: S.status, rows: S.validRows, flagged: S.flaggedRows };
+}

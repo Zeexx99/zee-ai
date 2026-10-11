@@ -16,6 +16,7 @@ export interface QuickActionHandlers {
   onProductionQc: () => void;
   onUnits: () => void;
   onEspCheck: () => void;
+  onEspAnalysis: () => void;
   onDraw: () => void;
 }
 
@@ -27,8 +28,8 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
     <Toolbar className="zee-quick" size="small" aria-label="Quick actions">
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <MenuButton size="small" appearance="subtle" icon={<Calculator20Regular />} disabled={p.disabled}>
-            Math
+          <MenuButton size="small" appearance="subtle" icon={<Calculator20Regular />} disabled={p.disabled} title="Math" aria-label="Math">
+            <span className="zee-quick-label">Math</span>
           </MenuButton>
         </MenuTrigger>
         <MenuPopover>
@@ -51,8 +52,8 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
 
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <MenuButton size="small" appearance="subtle" icon={<Broom20Regular />} disabled={p.disabled}>
-            Clean
+          <MenuButton size="small" appearance="subtle" icon={<Broom20Regular />} disabled={p.disabled} title="Clean" aria-label="Clean">
+            <span className="zee-quick-label">Clean</span>
           </MenuButton>
         </MenuTrigger>
         <MenuPopover>
@@ -68,8 +69,8 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
 
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <MenuButton size="small" appearance="subtle" icon={<MathFormula20Regular />} disabled={p.disabled}>
-            Analyze
+          <MenuButton size="small" appearance="subtle" icon={<MathFormula20Regular />} disabled={p.disabled} title="Analyze" aria-label="Analyze">
+            <span className="zee-quick-label">Analyze</span>
           </MenuButton>
         </MenuTrigger>
         <MenuPopover>
@@ -85,8 +86,8 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
 
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <MenuButton size="small" appearance="subtle" icon={<DataTrending20Regular />} disabled={p.disabled}>
-            Petroleum
+          <MenuButton size="small" appearance="subtle" icon={<DataTrending20Regular />} disabled={p.disabled} title="Petroleum" aria-label="Petroleum">
+            <span className="zee-quick-label">Petroleum</span>
           </MenuButton>
         </MenuTrigger>
         <MenuPopover>
@@ -98,6 +99,9 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuItem onClick={p.onProductionQc}>Production data QC</MenuItem>
             <MenuItem onClick={p.onUnits}>Unit conversion…</MenuItem>
             <MenuDivider />
+            <MenuItem onClick={p.onEspAnalysis} secondaryContent="calc">
+              ESP analysis…
+            </MenuItem>
             <MenuItem onClick={p.onEspCheck} secondaryContent="AI">
               ESP performance check
             </MenuItem>
@@ -107,8 +111,8 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
 
       <Menu>
         <MenuTrigger disableButtonEnhancement>
-          <MenuButton size="small" appearance="subtle" icon={<ChartMultiple20Regular />} disabled={p.disabled}>
-            Draw
+          <MenuButton size="small" appearance="subtle" icon={<ChartMultiple20Regular />} disabled={p.disabled} title="Draw" aria-label="Draw">
+            <span className="zee-quick-label">Draw</span>
           </MenuButton>
         </MenuTrigger>
         <MenuPopover>

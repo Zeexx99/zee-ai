@@ -169,6 +169,42 @@ export function fitArps(input: DcaInput): ArpsFit[] {
   return fits.map(({ ssr: _ssr, ...f }) => f).sort((a, b) => a.rmse - b.rmse);
 }
 
+export interface GroupFit {
+  group: string;
+  points: number;
+  dropped: number;
+  /** Excel time of the first valid point (t = 0 for the fit). */
+  t0: number;
+  best: ArpsFit | null;
+  error?: string;
+}
+
+/** Fit Arps curves separately for every group (e.g. well name). Groups keep first-seen order. */
+export function fitArpsByGroup(keys: unknown[], rawT: unknown[], rawQ: unknown[]): GroupFit[] {
+  const order: string[] = [];
+  const buckets = new Map<string, { t: unknown[]; q: unknown[] }>();
+  keys.forEach((k, i) => {
+    const key = String(k ?? "").trim();
+    if (!key) return;
+    if (!buckets.has(key)) {
+      buckets.set(key, { t: [], q: [] });
+      order.push(key);
+    }
+    const b = buckets.get(key)!;
+    b.t.push(rawT[i]);
+    b.q.push(rawQ[i]);
+  });
+  return order.map((group) => {
+    const b = buckets.get(group)!;
+    const prep = prepareDca(b.t, b.q);
+    try {
+      return { group, points: prep.t.length, dropped: prep.dropped, t0: prep.t0, best: fitArps(prep)[0] };
+    } catch (e) {
+      return { group, points: prep.t.length, dropped: prep.dropped, t0: prep.t0, best: null, error: (e as Error).message };
+    }
+  });
+}
+
 /* ================================================================ QC */
 
 export interface ColumnQc {

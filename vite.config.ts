@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { getHttpsServerOptions } from "office-addin-dev-certs";
 
 /** Dev-only: the task pane posts its errors here and they are appended to client-log.txt. */
@@ -38,11 +38,18 @@ function clientLog(): Plugin {
 // Port 3100 (not 3000) to avoid clashing with other local dev servers.
 export default defineConfig(async ({ command }) => {
   // No certificates needed for `vite build` (CI / GitHub Pages).
-  const https = command === "serve" ? await getHttpsServerOptions() : undefined;
+  // (Also none when Vitest runs the unit tests – it uses the "serve" command internally.)
+  const https = command === "serve" && !process.env.VITEST ? await getHttpsServerOptions() : undefined;
+  const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
   return {
     // Relative base so the same build works on https://localhost:3100/ and https://<user>.github.io/zee-ai/
     base: "./",
     plugins: [react(), clientLog()],
+    // Shown in Settings → About, so you can tell which build Excel actually loaded.
+    define: {
+      __ZEE_VERSION__: JSON.stringify(pkg.version),
+      __ZEE_BUILD__: JSON.stringify(new Date().toISOString()),
+    },
     server: { port: 3100, strictPort: true, https },
     preview: { port: 3100, strictPort: true, https },
     build: {
