@@ -27,7 +27,14 @@
         }
         window.__zeeLog = send;
         window.__zeeShowError = show;
+        // Harmless browser warnings that must not be shown as errors.
+        var BENIGN = /ResizeObserver loop (completed with undelivered notifications|limit exceeded)/i;
         window.addEventListener("error", function (e) {
+          if (BENIGN.test(e.message || "")) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            return;
+          }
           var t = e.target;
           // A code file from an older deploy is gone (cached page): reload once with a cache-buster.
           var src = t && t !== window && (t.src || t.href);
@@ -59,6 +66,7 @@
         ["error", "warn"].forEach(function (lvl) {
           var orig = console[lvl];
           console[lvl] = function () {
+            if (BENIGN.test(String(arguments[0] && arguments[0].message || arguments[0]))) return orig.apply(console, arguments);
             try { send("console." + lvl, Array.prototype.map.call(arguments, function (a) { return a && a.stack ? a.stack : (typeof a === "object" ? JSON.stringify(a) : String(a)); }).join(" ")); } catch (e) {}
             return orig.apply(console, arguments);
           };
