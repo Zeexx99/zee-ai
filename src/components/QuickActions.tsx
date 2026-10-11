@@ -1,6 +1,8 @@
 import { Menu, MenuButton, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Toolbar } from "@fluentui/react-components";
 import { Broom20Regular, Calculator20Regular, ChartMultiple20Regular, DataTrending20Regular, MathFormula20Regular } from "@fluentui/react-icons";
 import { AGGREGATE_LABELS, type AggregateFn } from "../services/excelService";
+import type { FnSpec } from "../functions/catalog";
+import { FunctionsMenu } from "./FunctionPicker";
 
 export interface QuickActionHandlers {
   onAggregate: (fn: AggregateFn) => void;
@@ -18,6 +20,8 @@ export interface QuickActionHandlers {
   onEspCheck: () => void;
   onEspAnalysis: () => void;
   onDraw: () => void;
+  onPickFunction: (spec: FnSpec) => void;
+  onFreeze: () => void;
 }
 
 const MATH: AggregateFn[] = ["SUM", "AVERAGE", "MIN", "MAX"];
@@ -26,6 +30,8 @@ const COUNTS: AggregateFn[] = ["COUNT", "COUNTA", "UNIQUE"];
 export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
   return (
     <Toolbar className="zee-quick" size="small" aria-label="Quick actions">
+      <FunctionsMenu disabled={p.disabled} onPick={p.onPickFunction} onFreeze={p.onFreeze} />
+
       <Menu>
         <MenuTrigger disableButtonEnhancement>
           <MenuButton size="small" appearance="subtle" icon={<Calculator20Regular />} disabled={p.disabled} title="Math" aria-label="Math">

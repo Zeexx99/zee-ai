@@ -655,3 +655,45 @@ body.zee-light {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 6px 10px;
 }
+
+/* ---------------------------------------------------------------- =ZEE functions drop list */
+
+.zee-fn-popover {
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  max-width: min(92vw, 360px);
+}
+
+.zee-fn-item {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  padding: 2px 0;
+}
+
+.zee-fn-name {
+  font-weight: 600;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zee-fn-brief {
+  font-size: 11.5px;
+  color: var(--zee-muted);
+  white-space: normal;
+}
+
+.zee-fn-syntax {
+  display: block;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  background: var(--zee-code-bg);
+  border: 1px solid var(--zee-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}

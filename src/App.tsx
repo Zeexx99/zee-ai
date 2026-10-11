@@ -47,6 +47,8 @@ import {
   type ExtractChoice,
 } from "./components/Dialogs";
 import { InsertActionsContext, copyText, type InsertActions } from "./components/insertActions";
+import { FunctionDialog, type ApplyWhere, type FunctionDialogState } from "./components/FunctionPicker";
+import { buildFormula, canApplyDirectly, guessHeader, inputCount, type FnSpec } from "./functions/catalog";
 
 import { isConfigured, loadSettings, modelLabel, saveSettings, type ZeeSettings } from "./services/settingsService";
 import {
@@ -58,6 +60,10 @@ import {
   getWorkbookOverview,
   insertConvertedColumns,
   formatSelectionAsTable,
+  freezeSelection,
+  getFunctionTarget,
+  writeFormulaColumn,
+  type FunctionTarget,
   addSheet,
   formatRangeAt,
   writeBlock,
@@ -84,7 +90,7 @@ import { ESP_PROMPT, getSelectionHeaders, runDeclineByWell, runDeclineCurve, run
 import { UNIT_CONVERSIONS } from "./utils/petro";
 import { estimateTokens, generateJson, type Usage } from "./services/geminiService";
 import { explainFormulaPrompt, generateFormulaPrompt, transformPrompt, TRANSFORM_SYSTEM_PROMPT } from "./services/prompts";
-import { stripSheet } from "./utils/a1";
+import { a1, a1Range, stripSheet } from "./utils/a1";
 import { extractValue, EXTRACT_LABELS } from "./utils/extract";
 import type { CleanOptions } from "./utils/clean";
 import type { Cell } from "./utils/markdown";
@@ -601,6 +607,94 @@ export default function App() {
     }
   };
 
+
+  /* ------------------------------------------------------------ =ZEE function picker */
+  const [fnDialog, setFnDialog] = useState<FunctionDialogState | null>(null);
+
+  const applyFunction = async (spec: FnSpec, values: Record<string, string>, header: boolean, where: ApplyWhere, target: FunctionTarget | null) => {
+    setFnDialog(null);
+    try {
+      if (spec.ai && !ensureConfigured()) return;
+      if (where === "cell" || !target || target.isEmpty || spec.mode === "single") {
+        const f = buildFormula(spec, values);
+        const addr = await withOverwrite((ow) => insertFormulas([f], { overwrite: ow, label: `insert ZEE.${spec.id}` }));
+        if (addr) toast("success", `ZEE.${spec.id} inserted`, `${stripSheet(addr)}  ${f}`);
+        return;
+      }
+
+      const first = target.rowIndex + (header ? 1 : 0);
+      const rows = target.rowCount - (header ? 1 : 0);
+      if (rows < 1) throw new Error("The selection only has a header row – select the data rows too.");
+      if (rows > 20000) throw new Error("Select at most 20,000 rows at a time.");
+      const outCol = target.columnIndex + target.columnCount;
+      const headerCell = header ? [`ZEE.${spec.id}`] : [];
+
+      let cells: string[];
+      let reserveRows = 0;
+      if (spec.mode === "range") {
+        if (spec.id === "FLAG" && rows > 1000) throw new Error("ZEE.FLAG checks up to 1,000 rows at a time – select fewer rows.");
+        const range = a1Range(first, target.columnIndex, rows, target.columnCount, true);
+        cells = [...headerCell, buildFormula(spec, values, [], range)];
+        if (spec.id === "FLAG") reserveRows = rows + headerCell.length; // spills one result per row
+      } else {
+        const n = inputCount(spec);
+        const formulas = Array.from({ length: rows }, (_, r) => {
+          const refs = Array.from({ length: Math.min(n, target.columnCount) }, (_, k) => a1(first + r, target.columnIndex + k));
+          return buildFormula(spec, values, refs);
+        });
+        if (spec.ai && rows > 50) {
+          const ok = await askConfirm({
+            title: `Run ZEE.${spec.id} on ${rows.toLocaleString()} rows?`,
+            message: `Rows are sent to Gemini in batches of 25 (about ${Math.ceil(rows / 25).toLocaleString()} requests); repeated values and recalculations come from the cache. Continue?`,
+            confirmLabel: "Run",
+          });
+          if (!ok) return;
+        }
+        cells = [...headerCell, ...formulas];
+      }
+
+      const addr = await withOverwrite((ow) =>
+        writeFormulaColumn(target.sheetName, target.rowIndex, outCol, cells, {
+          overwrite: ow,
+          header,
+          reserveRows,
+          label: `ZEE.${spec.id} column`,
+        })
+      );
+      if (addr) toast("success", `ZEE.${spec.id} applied`, `${stripSheet(addr)} · ${spec.mode === "range" ? "1 formula" : `${rows.toLocaleString()} rows`}`);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  const onPickFunction = async (spec: FnSpec) => {
+    let target: FunctionTarget | null = null;
+    if (inExcel) {
+      try {
+        target = await getFunctionTarget();
+      } catch (e) {
+        toastError(e);
+        return;
+      }
+    }
+    const header = !!target && !target.isEmpty && guessHeader(target.sample);
+    // Nothing to type and data is selected → apply straight away.
+    if (target && !target.isEmpty && canApplyDirectly(spec, target.columnCount)) {
+      await applyFunction(spec, {}, header, "selection", target);
+      return;
+    }
+    setFnDialog({ spec, target, header });
+  };
+
+  const onFreeze = async () => {
+    try {
+      const r = await freezeSelection();
+      toast("success", `Froze ${r.frozen.toLocaleString()} formulas`, `${stripSheet(r.address)} now holds fixed values (undo with ↶).`);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
   const simple = (fn: () => Promise<string>, title: string) => async () => {
     try {
       const r = await fn();
@@ -706,6 +800,8 @@ export default function App() {
           onEspCheck={onEspCheck}
           onEspAnalysis={openEspAnalysis}
           onDraw={openDraw}
+          onPickFunction={onPickFunction}
+          onFreeze={onFreeze}
         />
 
         {job && (
@@ -750,6 +846,7 @@ export default function App() {
           onPickSelection={() => getSelectedAddress().catch(() => null)}
         />
         <DrawDialog source={plotSource} onClose={() => setPlotSource(null)} onRun={onDraw} />
+        <FunctionDialog state={fnDialog} onClose={() => setFnDialog(null)} onApply={(spec, values, header, where) => applyFunction(spec, values, header, where, fnDialog?.target ?? null)} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />
       </InsertActionsContext.Provider>

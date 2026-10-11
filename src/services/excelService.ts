@@ -1282,3 +1282,120 @@ export async function createScatterSeriesChart(sheetName: string, title: string,
     }
   });
 }
+
+/* ---------------------------------------------------------------- =ZEE.* function picker */
+
+export interface FunctionTarget {
+  sheetName: string;
+  /** Clipped selection block (0-based). */
+  rowIndex: number;
+  columnIndex: number;
+  rowCount: number;
+  columnCount: number;
+  /** True when the selected cells hold no data → insert into the active cell instead. */
+  isEmpty: boolean;
+  /** First few rows of values (for header detection and previews). */
+  sample: unknown[][];
+  activeAddress: string;
+}
+
+/** Where a function picked in the pane would apply. */
+export async function getFunctionTarget(): Promise<FunctionTarget> {
+  return run(async (ctx) => {
+    const c = await loadClippedSelection(ctx);
+    const active = ctx.workbook.getActiveCell();
+    active.load("address");
+    const b = c.block;
+    let sample: unknown[][] = [];
+    if (!c.isEmpty) {
+      const r = c.sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, Math.min(b.rowCount, 3), Math.min(b.columnCount, 50));
+      r.load("values");
+      await ctx.sync();
+      sample = r.values;
+      if (sample.every((row) => row.every((v) => v === "" || v === null))) sample = [];
+    } else {
+      await ctx.sync();
+    }
+    return {
+      sheetName: c.sheetName,
+      rowIndex: b.rowIndex,
+      columnIndex: b.columnIndex,
+      rowCount: b.rowCount,
+      columnCount: b.columnCount,
+      isEmpty: c.isEmpty || sample.length === 0,
+      sample,
+      activeAddress: active.address,
+    };
+  });
+}
+
+/**
+ * Write a column of formulas (and optional header text) starting at (rowIndex, columnIndex).
+ * `reserveRows` lets a spilling formula (e.g. ZEE.FLAG) check that the cells it will spill into are empty.
+ */
+export async function writeFormulaColumn(
+  sheetName: string,
+  rowIndex: number,
+  columnIndex: number,
+  cells: string[],
+  opts: WriteOptions & { reserveRows?: number } = {}
+): Promise<string> {
+  if (!cells.length) throw new ExcelUserError("Nothing to insert.");
+  return run(async (ctx) => {
+    const sheet = ctx.workbook.worksheets.getItem(sheetName);
+    const checkRows = Math.max(cells.length, opts.reserveRows ?? 0);
+    if (rowIndex + checkRows > EXCEL_MAX_ROWS) throw new ExcelUserError("Not enough rows below the selection.");
+    const check = sheet.getRangeByIndexes(rowIndex, columnIndex, checkRows, 1);
+    check.load("address,formulas,numberFormat");
+    await ctx.sync();
+    if (!opts.overwrite && hasContent(check.formulas)) throw new OverwriteRequiredError(check.address);
+
+    setSnapshot({
+      kind: "cells",
+      sheetName,
+      address: check.address,
+      formulas: check.formulas,
+      numberFormat: check.numberFormat,
+      label: opts.label ?? `insert formulas at ${stripSheet(check.address)}`,
+    });
+    if (checkRows > cells.length) sheet.getRangeByIndexes(rowIndex + cells.length, columnIndex, checkRows - cells.length, 1).clear(Excel.ClearApplyTo.contents);
+    const target = sheet.getRangeByIndexes(rowIndex, columnIndex, cells.length, 1);
+    // Formulas must not inherit a Text ("@") format, or Excel shows them as text.
+    target.numberFormat = cells.map(() => ["General"]);
+    target.formulas = cells.map((f) => [f]);
+    if (opts.header) target.getCell(0, 0).format.font.bold = true;
+    target.format.autofitColumns();
+    target.getCell(opts.header && cells.length > 1 ? 1 : 0, 0).select();
+    await ctx.sync();
+    return target.address;
+  });
+}
+
+/** Replace formulas in the selection with their current values (stops further AI calls). */
+export async function freezeSelection(): Promise<{ address: string; frozen: number }> {
+  return run(async (ctx) => {
+    const c = await loadClippedSelection(ctx);
+    if (c.isEmpty) throw new ExcelUserError("Select the cells with =ZEE formulas you want to freeze.");
+    const b = c.block;
+    if (b.rowCount * b.columnCount > 200_000) throw new ExcelUserError("Select fewer cells (max 200,000) to freeze.");
+    const r = c.sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, b.rowCount, b.columnCount);
+    r.load("address,formulas,values,numberFormat");
+    await ctx.sync();
+    let frozen = 0;
+    const out = r.formulas.map((row, i) =>
+      row.map((f, j) => {
+        if (typeof f === "string" && f.startsWith("=")) {
+          frozen++;
+          return r.values[i][j];
+        }
+        // Spilled cells show a value but no formula of their own – keep their value too.
+        return f === "" && r.values[i][j] !== "" ? r.values[i][j] : f;
+      })
+    );
+    if (!frozen) throw new ExcelUserError("No formulas in the selection – nothing to freeze.");
+    setSnapshot({ kind: "cells", sheetName: c.sheetName, address: r.address, formulas: r.formulas, numberFormat: r.numberFormat, label: `freeze ${stripSheet(r.address)}` });
+    r.values = out as unknown[][] as (string | number | boolean)[][];
+    await ctx.sync();
+    return { address: r.address, frozen };
+  });
+}

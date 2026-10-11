@@ -436,6 +436,217 @@
           "dimensionality": "scalar"
         }
       ]
+    },
+    {
+      "id": "EXTRACT",
+      "name": "EXTRACT",
+      "description": "AI: pull one piece of information out of text. =ZEE.EXTRACT(B2, \"pump model\")",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "text",
+          "description": "Cell with the text",
+          "type": "any",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "what",
+          "description": "What to extract, e.g. \"pump model\"",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "CLASSIFY",
+      "name": "CLASSIFY",
+      "description": "AI: put text into exactly one of your categories. =ZEE.CLASSIFY(B2, \"Electrical, Mechanical, Reservoir\")",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "text",
+          "description": "Cell with the text",
+          "type": "any",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "categories",
+          "description": "Comma-separated categories",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "CLEAN",
+      "name": "CLEAN",
+      "description": "AI: fix spelling, spacing, casing and format. =ZEE.CLEAN(B2, [style])",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "text",
+          "description": "Cell with the value",
+          "type": "any",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "style",
+          "description": "Optional style, e.g. \"dates as YYYY-MM-DD\"",
+          "type": "string",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "TRANSLATE",
+      "name": "TRANSLATE",
+      "description": "AI: translate text. =ZEE.TRANSLATE(B2, \"English\")",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "text",
+          "description": "Cell with the text",
+          "type": "any",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "language",
+          "description": "Target language (default English)",
+          "type": "string",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "SUMMARIZE",
+      "name": "SUMMARIZE",
+      "description": "AI: summarize a block of cells. =ZEE.SUMMARIZE(A2:D50, 30)",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "range",
+          "description": "Cells to summarize",
+          "type": "any",
+          "dimensionality": "matrix"
+        },
+        {
+          "name": "max_words",
+          "description": "Maximum words (default 30)",
+          "type": "number",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "FLAG",
+      "name": "FLAG",
+      "description": "AI: flag rows that break a rule; returns one column. =ZEE.FLAG(A2:D200, \"amps jump >20%\")",
+      "result": {
+        "type": "string",
+        "dimensionality": "matrix"
+      },
+      "parameters": [
+        {
+          "name": "range",
+          "description": "Rows to check",
+          "type": "any",
+          "dimensionality": "matrix"
+        },
+        {
+          "name": "rule",
+          "description": "The rule in plain words",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "FORMULA",
+      "name": "FORMULA",
+      "description": "AI: write an Excel formula from a description (returned as text). =ZEE.FORMULA(\"sum of C where B is ESP\")",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "description",
+          "description": "What the formula should do",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "sample",
+          "description": "Optional sample of the data",
+          "type": "any",
+          "dimensionality": "matrix",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "EXPLAIN",
+      "name": "EXPLAIN",
+      "description": "AI: explain a formula in plain words. =ZEE.EXPLAIN(FORMULATEXT(B2))",
+      "result": {
+        "type": "string",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "formula",
+          "description": "Formula text, e.g. FORMULATEXT(B2)",
+          "type": "any",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "UNITS",
+      "name": "UNITS",
+      "description": "Convert any unit (no AI): =ZEE.UNITS(B2, \"bbl/d\", \"m3/d\"). Units: psi, bar, kPa, atm, bbl, m3, scf, Mscf, bbl/d, m3/d, Mscf/d, MMscf/d, gpm, ft, m, F, C, K, API, SG, ppg, psi/ft, hp, kW, cp, kg, lb…",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "value",
+          "description": "Value to convert",
+          "type": "any",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "from",
+          "description": "From unit, e.g. \"psi\"",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "to",
+          "description": "To unit, e.g. \"bar\"",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
     }
   ]
 }
