@@ -17,6 +17,15 @@ export function useInsertActions(): InsertActions {
   return ctx;
 }
 
+/** Open a URL in the user's browser (Office dialog API inside Excel, a new tab elsewhere). */
+export function openExternal(url: string) {
+  try {
+    Office.context.ui.openBrowserWindow(url);
+  } catch {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);

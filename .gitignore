@@ -10,3 +10,5 @@ setup-status.txt
 start-log.txt
 manifest-old*.xml
 push-*/
+backup-before-*/
+update-log.txt

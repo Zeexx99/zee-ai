@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useState } from "react";
 import { createDarkTheme, createLightTheme, type BrandVariants, type Theme } from "@fluentui/react-components";
 
 /** Zee AI brand ramp (violet → used for primary buttons, focus, links). */
@@ -36,4 +37,50 @@ export function prefersDark(): boolean {
     /* not in Office */
   }
   return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+}
+
+/**
+ * Tracks the "automatic" colour scheme: Office theme first, OS setting as fallback.
+ * Excel doesn't reliably fire a theme-changed event, so we also re-check when the pane regains
+ * focus or the OS scheme flips.
+ */
+export function useAutoDark(): boolean {
+  const [dark, setDark] = useState(prefersDark);
+  useEffect(() => {
+    const check = () => setDark(prefersDark());
+    const mq = window.matchMedia?.("(prefers-color-scheme: dark)");
+    mq?.addEventListener?.("change", check);
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", check);
+    let officeHandler = false;
+    try {
+      // Supported by some Office hosts/versions only; harmless elsewhere.
+      Office.context.document.addHandlerAsync(Office.EventType.OfficeThemeChanged, check, (r) => {
+        officeHandler = r.status === Office.AsyncResultStatus.Succeeded;
+      });
+    } catch {
+      /* not supported */
+    }
+    return () => {
+      mq?.removeEventListener?.("change", check);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", check);
+      if (officeHandler) {
+        try {
+          Office.context.document.removeHandlerAsync(Office.EventType.OfficeThemeChanged, { handler: check });
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+  }, []);
+  return dark;
+}
+
+/** Applies the theme class to <body> synchronously so portals (dialogs, drawer, toasts) match and nothing flashes. */
+export function useBodyThemeClass(dark: boolean) {
+  useLayoutEffect(() => {
+    document.body.classList.toggle("zee-dark", dark);
+    document.body.classList.toggle("zee-light", !dark);
+  }, [dark]);
 }

@@ -34,6 +34,12 @@ body.zee-dark {
   --zee-user: #6b55e8;
   --zee-code-bg: #15141b;
   background: var(--zee-bg);
+  /* Native scrollbars, form controls and selection colours follow the theme too. */
+  color-scheme: dark;
+}
+
+body.zee-light {
+  color-scheme: light;
 }
 
 .zee-app {
@@ -503,6 +509,12 @@ body.zee-dark {
 .zee-action-error {
   color: #b42318;
 }
+.zee-dark .zee-action-done {
+  color: #6fdc8c;
+}
+.zee-dark .zee-action-error {
+  color: #ff9b91;
+}
 .zee-action-detail {
   opacity: 0.85;
 }
@@ -531,6 +543,18 @@ body.zee-dark {
 
 .zee-approval li {
   margin: 2px 0;
+}
+
+.zee-approval-warn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0;
+  font-size: 11.5px;
+  color: #a15c00;
+}
+.zee-dark .zee-approval-warn {
+  color: #ffbf73;
 }
 
 .zee-approval-preview {

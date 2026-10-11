@@ -765,6 +765,26 @@ export async function setCells(address: string, rows: unknown[][], sheet?: strin
   });
 }
 
+/**
+ * For the agent approval card: would a set_cells call replace existing data?
+ * Returns the address of the target block if it already holds something, else null.
+ */
+export async function writeTargetHasData(args: Record<string, unknown>): Promise<string | null> {
+  const rows = Array.isArray(args.values) ? (args.values as unknown[]).map((r) => (Array.isArray(r) ? r : [r])) : [];
+  if (!rows.length || typeof args.address !== "string") return null;
+  const width = Math.max(1, ...rows.map((r) => r.length));
+  return run(async (ctx) => {
+    const start = resolveRange(ctx, args.address as string, typeof args.sheet === "string" ? args.sheet : undefined).getCell(0, 0);
+    start.load("rowIndex,columnIndex");
+    const ws = start.worksheet;
+    await ctx.sync();
+    const target = ws.getRangeByIndexes(start.rowIndex, start.columnIndex, rows.length, width);
+    target.load("address,formulas");
+    await ctx.sync();
+    return hasContent(target.formulas) ? target.address : null;
+  });
+}
+
 export interface RangeFormat extends FormatOptions {
   wrap?: boolean;
 }

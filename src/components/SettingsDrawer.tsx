@@ -21,11 +21,12 @@ import {
   Switch,
 } from "@fluentui/react-components";
 import { ArrowSync16Regular, Dismiss24Regular, Eye20Regular, EyeOff20Regular, Person16Regular } from "@fluentui/react-icons";
-import { DEFAULT_MODELS, modelHint, modelLabel, type AuthMode, type ZeeSettings } from "../services/settingsService";
+import { DEFAULT_MODELS, modelHint, modelLabel, type AuthMode, type ThemeMode, type ZeeSettings } from "../services/settingsService";
 import { getGoogleSession, signInWithGoogle, signOutGoogle, type GoogleSession } from "../services/authService";
 import { listModels, testConnection } from "../services/geminiService";
 import { clearFunctionCache } from "../functions/zeeFunctions";
 import type { UsageTotals } from "../App";
+import { openExternal } from "./insertActions";
 
 interface Props {
   open: boolean;
@@ -43,14 +44,6 @@ const TEMPS: Array<{ value: string; label: string }> = [
   { value: "0.4", label: "0.4 – balanced" },
   { value: "1", label: "1.0 – creative" },
 ];
-
-function openExternal(url: string) {
-  try {
-    Office.context.ui.openBrowserWindow(url);
-  } catch {
-    window.open(url, "_blank", "noopener");
-  }
-}
 
 function minutesLeft(s: GoogleSession | null): number {
   return s ? Math.max(0, Math.round((s.expiresAt - Date.now()) / 60000)) : 0;
@@ -287,6 +280,18 @@ export function SettingsDrawer({ open, settings, usage, onChange, onClose }: Pro
               ))}
             </Dropdown>
           </Field>
+        </section>
+
+        <Divider />
+
+        <section>
+          <h3>Appearance</h3>
+          <RadioGroup layout="horizontal" value={settings.theme} onChange={(_, d) => onChange({ theme: d.value as ThemeMode })} aria-label="Theme">
+            <Radio value="auto" label="Match Office" />
+            <Radio value="light" label="Light" />
+            <Radio value="dark" label="Dark" />
+          </RadioGroup>
+          <p className="zee-muted">"Match Office" follows your Office theme (File → Account → Office Theme). Tip: the moon/sun button in the header switches quickly.</p>
         </section>
 
         <Divider />

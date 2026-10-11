@@ -16,9 +16,9 @@ import {
   useToastController,
   type ToastIntent,
 } from "@fluentui/react-components";
-import { Add20Regular, ArrowUndo20Regular, Settings20Regular } from "@fluentui/react-icons";
+import { Add20Regular, ArrowUndo20Regular, Settings20Regular, WeatherMoon20Regular, WeatherSunny20Regular } from "@fluentui/react-icons";
 
-import { darkTheme, lightTheme, prefersDark } from "./theme";
+import { darkTheme, lightTheme, useAutoDark, useBodyThemeClass } from "./theme";
 import { useChat } from "./hooks/useChat";
 import { ChatFeed } from "./components/ChatFeed";
 import { ChatInput } from "./components/ChatInput";
@@ -94,10 +94,9 @@ export default function App() {
       return next;
     });
   }, []);
-  const [dark] = useState(() => prefersDark());
-  useEffect(() => {
-    document.body.classList.toggle("zee-dark", dark);
-  }, [dark]);
+  const autoDark = useAutoDark();
+  const dark = settings.theme === "auto" ? autoDark : settings.theme === "dark";
+  useBodyThemeClass(dark);
   const inExcel = useMemo(() => isExcelAvailable(), []);
 
   /* ------------------------------------------------------------ toasts */
@@ -516,6 +515,14 @@ export default function App() {
             <Button appearance="subtle" size="small" icon={<ArrowUndo20Regular />} disabled={!undoLabel} onClick={undo}>
               {undoDepth > 1 ? undoDepth : undefined}
             </Button>
+          </Tooltip>
+          <Tooltip content={dark ? "Switch to light mode" : "Switch to dark mode"} relationship="label">
+            <Button
+              appearance="subtle"
+              size="small"
+              icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
+              onClick={() => updateSettings({ theme: dark ? "light" : "dark" })}
+            />
           </Tooltip>
           <Tooltip content="New chat" relationship="label">
             <Button appearance="subtle" size="small" icon={<Add20Regular />} onClick={clear} disabled={!messages.length} />

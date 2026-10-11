@@ -5,10 +5,10 @@ import rehypeHighlight from "rehype-highlight";
 import { common } from "lowlight";
 import excel from "highlight.js/lib/languages/excel";
 import { Button, Spinner, Tooltip } from "@fluentui/react-components";
-import { Add16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, ErrorCircle16Regular, Eye16Regular, Prohibited16Regular, Wrench16Regular } from "@fluentui/react-icons";
+import { Add16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, ErrorCircle16Regular, Eye16Regular, Prohibited16Regular, Warning16Regular, Wrench16Regular } from "@fluentui/react-icons";
 import type { ActionLog, ChatMessage, PendingApproval } from "../hooks/useChat";
 import { formulasFromCode, hastTableToMatrix, hastText, parseDelimited, type HastLike } from "../utils/markdown";
-import { copyText, useInsertActions } from "./insertActions";
+import { copyText, openExternal, useInsertActions } from "./insertActions";
 import { modelLabel } from "../services/settingsService";
 
 const rehypePlugins: Options["rehypePlugins"] = [
@@ -121,6 +121,11 @@ function ApprovalCard({ pending }: { pending: PendingApproval }) {
         {pending.calls.map((c, i) => (
           <li key={i}>
             {c.description}
+            {c.overwrites && (
+              <div className="zee-approval-warn">
+                <Warning16Regular /> Replaces existing data in {c.overwrites.replace(/^.*!/, "")}
+              </div>
+            )}
             {c.preview && (
               <table className="zee-approval-preview">
                 <tbody>
@@ -169,7 +174,18 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
         </TableBlock>
       ),
       a: ({ href, children }) => (
-        <a href={href} target="_blank" rel="noreferrer">
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => {
+            // Task panes can't open new tabs reliably (desktop Excel ignores target=_blank or navigates the pane away).
+            if (href && /^https?:/i.test(href)) {
+              e.preventDefault();
+              openExternal(href);
+            }
+          }}
+        >
           {children}
         </a>
       ),

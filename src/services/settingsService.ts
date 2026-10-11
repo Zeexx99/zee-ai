@@ -9,6 +9,9 @@
 
 export type AuthMode = "apiKey" | "google" | "proxy";
 
+/** "auto" follows the Office theme (or the OS colour scheme outside Office). */
+export type ThemeMode = "auto" | "light" | "dark";
+
 export interface ModelInfo {
   id: string;
   label: string;
@@ -52,6 +55,8 @@ export interface ZeeSettings {
   agentMode: boolean;
   /** Agent mode: apply changes without asking (not recommended). */
   autoApprove: boolean;
+  /** Appearance of the task pane. */
+  theme: ThemeMode;
 }
 
 export const DEFAULT_SETTINGS: ZeeSettings = {
@@ -71,6 +76,7 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   costGuardTokens: 20000,
   agentMode: true,
   autoApprove: false,
+  theme: "auto",
 };
 
 const STORAGE_KEY = "zeeai.settings.v1";
@@ -80,7 +86,9 @@ export function loadSettings(): ZeeSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<ZeeSettings>;
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    const merged = { ...DEFAULT_SETTINGS, ...parsed };
+    if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "auto";
+    return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

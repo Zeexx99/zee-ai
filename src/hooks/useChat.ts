@@ -4,7 +4,7 @@ import type { ZeeSettings } from "../services/settingsService";
 import { SYSTEM_PROMPT } from "../services/prompts";
 import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WRITE_TOOLS, describeCall, executeTool, previewCall, type ToolCall } from "../services/agentService";
 import { clearChat, getDocId, loadChat, saveChat } from "../services/chatStore";
-import { invalidateOverview } from "../services/excelService";
+import { invalidateOverview, writeTargetHasData } from "../services/excelService";
 
 export interface ActionLog {
   description: string;
@@ -13,7 +13,7 @@ export interface ActionLog {
 }
 
 export interface PendingApproval {
-  calls: Array<{ description: string; preview: string[][] | null }>;
+  calls: Array<{ description: string; preview: string[][] | null; /** Address whose existing data would be replaced. */ overwrites?: string | null }>;
 }
 
 export interface ChatMessage {
@@ -79,6 +79,16 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
   const messagesRef = useRef<ChatMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const approvalRef = useRef<((approved: boolean) => void) | null>(null);
+  const saveTimer = useRef(0);
+
+  // Persist history, debounced: streaming patches the message ~60×/s and serialising the whole
+  // chat into localStorage on every frame made long conversations sluggish.
+  const scheduleSave = useCallback((next: ChatMessage[], immediate = false) => {
+    window.clearTimeout(saveTimer.current);
+    if (immediate) saveChat(docIdRef.current, next);
+    else saveTimer.current = window.setTimeout(() => saveChat(docIdRef.current, messagesRef.current), 400);
+  }, []);
+  useEffect(() => () => window.clearTimeout(saveTimer.current), []);
 
   // Load this workbook's history once.
   useEffect(() => {
@@ -92,10 +102,10 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
     setMessages((prev) => {
       const next = fn(prev);
       messagesRef.current = next;
-      saveChat(docIdRef.current, next);
+      scheduleSave(next, !next.some((m) => m.status === "streaming"));
       return next;
     });
-  }, []);
+  }, [scheduleSave]);
 
   const patch = useCallback(
     (id: string, p: Partial<ChatMessage> | ((m: ChatMessage) => Partial<ChatMessage>)) => {
@@ -133,7 +143,12 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
 
   const fail = useCallback(
     (asstId: string, e: unknown) => {
-      const err = e instanceof GeminiError ? e : new GeminiError((e as Error)?.message ?? String(e));
+      const err =
+        e instanceof GeminiError
+          ? e
+          : (e as Error)?.name === "AbortError"
+            ? new GeminiError("Stopped.", "aborted")
+            : new GeminiError((e as Error)?.message ?? String(e));
       patch(asstId, (x) => {
         if (err.kind === "aborted") return { text: x.text ? `${x.text}\n\n_…stopped._` : "_Stopped._", status: "done", pending: undefined };
         return { text: err.message, status: "error", pending: undefined };
@@ -210,7 +225,8 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
           const writes = calls.filter((c) => WRITE_TOOLS.has(c.name));
           let approved = true;
           if (writes.length && !getSettings().autoApprove) {
-            patch(asstId, { pending: { calls: writes.map((c) => ({ description: describeCall(c), preview: previewCall(c) })) } });
+            const overwrites = await Promise.all(writes.map((c) => (c.name === "set_cells" ? writeTargetHasData(c.args).catch(() => null) : Promise.resolve(null))));
+            patch(asstId, { pending: { calls: writes.map((c, i) => ({ description: describeCall(c), preview: previewCall(c), overwrites: overwrites[i] })) } });
             approved = await new Promise<boolean>((resolve) => {
               approvalRef.current = resolve;
               controller.signal.addEventListener("abort", () => resolve(false), { once: true });
