@@ -578,3 +578,46 @@ body.zee-light {
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* ---------------------------------------------------------------- draw dialog */
+
+.zee-draw-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.zee-draw-section h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.zee-draw-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--zee-border);
+  border-radius: 8px;
+  padding: 2px 4px;
+}
+
+.zee-draw-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.zee-draw-letter {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  color: var(--zee-muted);
+  min-width: 18px;
+}
+
+.zee-draw-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}

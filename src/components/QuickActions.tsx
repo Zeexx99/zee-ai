@@ -1,5 +1,5 @@
 import { Menu, MenuButton, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Toolbar } from "@fluentui/react-components";
-import { Broom20Regular, Calculator20Regular, DataTrending20Regular, MathFormula20Regular } from "@fluentui/react-icons";
+import { Broom20Regular, Calculator20Regular, ChartMultiple20Regular, DataTrending20Regular, MathFormula20Regular } from "@fluentui/react-icons";
 import { AGGREGATE_LABELS, type AggregateFn } from "../services/excelService";
 
 export interface QuickActionHandlers {
@@ -16,6 +16,7 @@ export interface QuickActionHandlers {
   onProductionQc: () => void;
   onUnits: () => void;
   onEspCheck: () => void;
+  onDraw: () => void;
 }
 
 const MATH: AggregateFn[] = ["SUM", "AVERAGE", "MIN", "MAX"];
@@ -100,6 +101,20 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuItem onClick={p.onEspCheck} secondaryContent="AI">
               ESP performance check
             </MenuItem>
+          </MenuList>
+        </MenuPopover>
+      </Menu>
+
+      <Menu>
+        <MenuTrigger disableButtonEnhancement>
+          <MenuButton size="small" appearance="subtle" icon={<ChartMultiple20Regular />} disabled={p.disabled}>
+            Draw
+          </MenuButton>
+        </MenuTrigger>
+        <MenuPopover>
+          <MenuList>
+            <MenuGroupHeader>Charts from your columns</MenuGroupHeader>
+            <MenuItem onClick={p.onDraw}>Plot columns (X vs several Y)…</MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>

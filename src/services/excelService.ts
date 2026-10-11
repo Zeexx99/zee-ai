@@ -986,3 +986,141 @@ export async function readRangeValues(address: string, sheet?: string, maxCells 
     return r.values;
   });
 }
+
+/* ================================================================ Draw: plot chosen columns */
+
+export interface PlotColumn {
+  /** Absolute column index on the sheet. */
+  index: number;
+  letter: string;
+  /** Header text, or "Column X" when there is no header row. */
+  name: string;
+  /** Most sampled data cells are numbers (dates count as numbers). */
+  numeric: boolean;
+}
+
+export interface PlotSource {
+  sheetName: string;
+  /** Where the data comes from, e.g. "A1:F250" – the selection if it has 2+ columns, otherwise the used range. */
+  address: string;
+  columns: PlotColumn[];
+  hasHeader: boolean;
+  /** Absolute row indexes of the first and last data rows (header excluded). */
+  firstDataRow: number;
+  lastDataRow: number;
+}
+
+const isNum = (v: unknown) => typeof v === "number" || (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v.replace(/,/g, ""))));
+
+/** Columns available for plotting: the selection (if it spans 2+ columns) or the active sheet's used range. */
+export async function getPlotSource(): Promise<PlotSource> {
+  return run(async (ctx) => {
+    const c = await loadClippedSelection(ctx);
+    let block = c.block;
+    if (c.isEmpty || block.columnCount < 2 || block.rowCount < 2) {
+      const used = c.sheet.getUsedRangeOrNullObject(true);
+      used.load("address,rowIndex,columnIndex,rowCount,columnCount");
+      await ctx.sync();
+      if (used.isNullObject) throw new ExcelUserError("This sheet is empty. Open the sheet with your data first.");
+      block = blockOf(used);
+    }
+    if (block.columnCount < 2) throw new ExcelUserError("The data needs at least two columns: one for the X axis and one to plot.");
+    const cols = Math.min(block.columnCount, 200);
+    const sampleRows = Math.min(block.rowCount, 12);
+    const sample = c.sheet.getRangeByIndexes(block.rowIndex, block.columnIndex, sampleRows, cols);
+    sample.load("values");
+    await ctx.sync();
+
+    const first = sample.values[0] ?? [];
+    const textCells = first.filter((v) => typeof v === "string" && v.trim() !== "" && !isNum(v)).length;
+    const hasHeader = block.rowCount > 1 && textCells >= Math.ceil(first.filter((v) => v !== "" && v !== null).length / 2) && textCells > 0;
+    const body = hasHeader ? sample.values.slice(1) : sample.values;
+
+    const columns: PlotColumn[] = Array.from({ length: cols }, (_, j) => {
+      const letter = columnLetter(block.columnIndex + j);
+      const raw = hasHeader ? String(first[j] ?? "").trim() : "";
+      const filled = body.map((r) => r[j]).filter((v) => v !== "" && v !== null && v !== undefined);
+      return {
+        index: block.columnIndex + j,
+        letter,
+        name: raw || `Column ${letter}`,
+        numeric: filled.length > 0 && filled.filter(isNum).length >= Math.ceil(filled.length * 0.6),
+      };
+    });
+    return {
+      sheetName: c.sheetName,
+      address: stripSheet(block.address),
+      columns,
+      hasHeader,
+      firstDataRow: block.rowIndex + (hasHeader ? 1 : 0),
+      lastDataRow: block.rowIndex + block.rowCount - 1,
+    };
+  });
+}
+
+export type PlotKind = "line" | "scatterLines" | "scatter" | "column";
+const PLOT_TYPES: Record<PlotKind, string> = {
+  line: "Line",
+  scatterLines: "XYScatterLinesNoMarkers",
+  scatter: "XYScatter",
+  column: "ColumnClustered",
+};
+
+export interface PlotRequest {
+  source: PlotSource;
+  xIndex: number;
+  yIndexes: number[];
+  kind: PlotKind;
+  title?: string;
+}
+
+/** Chart several Y columns against one X column (columns need not be next to each other). */
+export async function plotColumns(req: PlotRequest): Promise<string> {
+  const { source: src } = req;
+  if (!req.yIndexes.length) throw new ExcelUserError("Tick at least one column to plot on the Y axis.");
+  const rows = src.lastDataRow - src.firstDataRow + 1;
+  if (rows < 1) throw new ExcelUserError("There are no data rows under the header.");
+  const colByIndex = new Map(src.columns.map((c) => [c.index, c]));
+  const xName = colByIndex.get(req.xIndex)?.name ?? "X";
+  return run(async (ctx) => {
+    const ws = ctx.workbook.worksheets.getItem(src.sheetName);
+    const xRange = ws.getRangeByIndexes(src.firstDataRow, req.xIndex, rows, 1);
+    const yRanges = req.yIndexes.map((i) => ws.getRangeByIndexes(src.firstDataRow, i, rows, 1));
+
+    const chart = ws.charts.add(PLOT_TYPES[req.kind] as Excel.ChartType, yRanges[0], Excel.ChartSeriesBy.columns);
+    const first = chart.series.getItemAt(0);
+    first.name = colByIndex.get(req.yIndexes[0])?.name ?? "Series 1";
+    first.setXAxisValues(xRange);
+    req.yIndexes.slice(1).forEach((idx, k) => {
+      const s = chart.series.add(colByIndex.get(idx)?.name ?? `Series ${k + 2}`);
+      s.setValues(yRanges[k + 1]);
+      s.setXAxisValues(xRange);
+    });
+
+    const title = req.title?.trim() || `${req.yIndexes.map((i) => colByIndex.get(i)?.name ?? "").join(", ")} vs ${xName}`;
+    chart.title.text = title.length > 120 ? `${title.slice(0, 117)}…` : title;
+    chart.title.visible = true;
+    chart.legend.visible = true;
+    chart.legend.position = Excel.ChartLegendPosition.bottom;
+    try {
+      chart.axes.categoryAxis.title.text = xName;
+      chart.axes.categoryAxis.title.visible = true;
+      if (req.yIndexes.length === 1) {
+        chart.axes.valueAxis.title.text = colByIndex.get(req.yIndexes[0])?.name ?? "";
+        chart.axes.valueAxis.title.visible = true;
+      }
+    } catch {
+      /* axis titles need ExcelApi 1.7+ – the chart is still fine without them */
+    }
+
+    // Place it to the right of the data, aligned with the header row.
+    const lastCol = Math.max(...src.columns.map((c) => c.index));
+    chart.setPosition(ws.getRangeByIndexes(Math.max(0, src.firstDataRow - (src.hasHeader ? 1 : 0)), lastCol + 2, 1, 1));
+    chart.width = 520;
+    chart.height = 320;
+    chart.load("name");
+    await ctx.sync();
+    setSnapshot({ kind: "addedChart", sheetName: src.sheetName, chartName: chart.name, label: `chart "${title.slice(0, 40)}"` });
+    return title;
+  });
+}

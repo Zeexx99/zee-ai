@@ -21,7 +21,7 @@ import {
 import { DEFAULT_CLEAN_OPTIONS, type CaseMode, type CleanOptions, type DateOrder } from "../utils/clean";
 import { EXTRACT_LABELS, type ExtractKind } from "../utils/extract";
 import { UNIT_CONVERSIONS } from "../utils/petro";
-import type { ChartKind } from "../services/excelService";
+import type { ChartKind, PlotKind, PlotSource } from "../services/excelService";
 
 /* ------------------------------------------------------------ confirm */
 
@@ -358,6 +358,132 @@ export function ChartDialog({ open, onClose, onRun }: { open: boolean; onClose: 
             </Button>
             <Button appearance="primary" onClick={() => onRun(kind, title.trim())}>
               Create chart
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
+/* ------------------------------------------------------------ draw: plot columns */
+
+export interface DrawChoice {
+  xIndex: number;
+  yIndexes: number[];
+  kind: PlotKind;
+  title: string;
+}
+
+const PLOT_LABELS: Record<PlotKind, string> = {
+  line: "Line",
+  scatterLines: "Scatter with lines (numeric / date X)",
+  scatter: "Scatter (points only)",
+  column: "Column",
+};
+
+export function DrawDialog({ source, onClose, onRun }: { source: PlotSource | null; onClose: () => void; onRun: (c: DrawChoice) => void }) {
+  const cols = source?.columns ?? [];
+  const [xIndex, setXIndex] = useState(0);
+  const [yIndexes, setYIndexes] = useState<number[]>([]);
+  const [kind, setKind] = useState<PlotKind>("line");
+  const [title, setTitle] = useState("");
+
+  // New data source → sensible defaults: first column on X, the next numeric columns (up to 4) on Y.
+  useEffect(() => {
+    if (!source) return;
+    const x = source.columns[0]?.index ?? 0;
+    setXIndex(x);
+    setYIndexes(source.columns.filter((c) => c.index !== x && c.numeric).slice(0, 4).map((c) => c.index));
+    setKind(source.columns[0]?.numeric ? "scatterLines" : "line");
+    setTitle("");
+  }, [source]);
+
+  const xCol = cols.find((c) => c.index === xIndex);
+  const yChoices = cols.filter((c) => c.index !== xIndex);
+  const toggle = (idx: number, on: boolean) =>
+    setYIndexes((prev) => (on ? [...prev, idx].sort((a, b) => a - b) : prev.filter((i) => i !== idx)));
+  const pickX = (idx: number) => {
+    setXIndex(idx);
+    setYIndexes((prev) => prev.filter((i) => i !== idx));
+  };
+
+  return (
+    <Dialog open={!!source} onOpenChange={(_, d) => !d.open && onClose()}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>Draw – plot columns</DialogTitle>
+          <DialogContent className="zee-form">
+            <p className="zee-muted">
+              Data from {source?.sheetName}!{source?.address}
+              {source?.hasHeader ? " (first row used as names)" : ""}. Select a range first to limit the rows.
+            </p>
+
+            <section className="zee-draw-section">
+              <h4>1 · X axis</h4>
+              <Dropdown
+                aria-label="X axis column"
+                value={xCol ? `${xCol.letter} – ${xCol.name}` : ""}
+                selectedOptions={[String(xIndex)]}
+                onOptionSelect={(_, d) => d.optionValue && pickX(Number(d.optionValue))}
+              >
+                {cols.map((c) => (
+                  <Option key={c.index} value={String(c.index)} text={`${c.letter} – ${c.name}`}>
+                    {c.letter} – {c.name}
+                  </Option>
+                ))}
+              </Dropdown>
+            </section>
+
+            <section className="zee-draw-section">
+              <h4>
+                2 · Y axis data <span className="zee-muted">({yIndexes.length} selected)</span>
+              </h4>
+              <div className="zee-draw-list">
+                {yChoices.map((c) => (
+                  <Checkbox
+                    key={c.index}
+                    checked={yIndexes.includes(c.index)}
+                    onChange={(_, d) => toggle(c.index, !!d.checked)}
+                    label={
+                      <span className="zee-draw-label">
+                        <span className="zee-draw-letter">{c.letter}</span>
+                        <span className="zee-draw-name">{c.name}</span>
+                        {!c.numeric && <span className="zee-muted"> (text)</span>}
+                      </span>
+                    }
+                  />
+                ))}
+              </div>
+              <div className="zee-row">
+                <Button size="small" appearance="subtle" onClick={() => setYIndexes(yChoices.filter((c) => c.numeric).map((c) => c.index))}>
+                  All numeric
+                </Button>
+                <Button size="small" appearance="subtle" onClick={() => setYIndexes([])}>
+                  Clear
+                </Button>
+              </div>
+            </section>
+
+            <Field label="Chart type">
+              <Dropdown value={PLOT_LABELS[kind]} selectedOptions={[kind]} onOptionSelect={(_, d) => d.optionValue && setKind(d.optionValue as PlotKind)}>
+                {(Object.keys(PLOT_LABELS) as PlotKind[]).map((k) => (
+                  <Option key={k} value={k}>
+                    {PLOT_LABELS[k]}
+                  </Option>
+                ))}
+              </Dropdown>
+            </Field>
+            <Field label="Title (optional)" hint="Leave empty for “Y names vs X name”.">
+              <Input value={title} onChange={(_, d) => setTitle(d.value)} />
+            </Field>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button appearance="primary" disabled={!yIndexes.length} onClick={() => onRun({ xIndex, yIndexes, kind, title: title.trim() })}>
+              Draw chart
             </Button>
           </DialogActions>
         </DialogBody>

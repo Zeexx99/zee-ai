@@ -30,11 +30,13 @@ import {
   CleanDialog,
   ConfirmDialog,
   DeclineCurveDialog,
+  DrawDialog,
   ExtractDialog,
   GenerateFormulaDialog,
   UnitDialog,
   type ConfirmState,
   type DcaChoice,
+  type DrawChoice,
   type ExtractChoice,
 } from "./components/Dialogs";
 import { InsertActionsContext, type InsertActions } from "./components/insertActions";
@@ -49,6 +51,9 @@ import {
   getWorkbookOverview,
   insertConvertedColumns,
   formatSelectionAsTable,
+  getPlotSource,
+  plotColumns,
+  type PlotSource,
   formatSelectionForPrompt,
   getActiveCellInfo,
   getSelectedAddress,
@@ -288,6 +293,7 @@ export default function App() {
   const [chartOpen, setChartOpen] = useState(false);
   const [unitOpen, setUnitOpen] = useState(false);
   const [dcaHeaders, setDcaHeaders] = useState<string[] | null>(null);
+  const [plotSource, setPlotSource] = useState<PlotSource | null>(null);
   const [job, setJob] = useState<{ text: string; abort?: AbortController } | null>(null);
 
   const onAggregate = async (fn: AggregateFn) => {
@@ -486,6 +492,29 @@ export default function App() {
     await send({ display: "ESP performance check", prompt: ESP_PROMPT + ctx, contextLabel: label, forceChat: true });
   };
 
+  const openDraw = async () => {
+    try {
+      setPlotSource(await getPlotSource());
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
+  const onDraw = async (c: DrawChoice) => {
+    const src = plotSource;
+    setPlotSource(null);
+    if (!src) return;
+    setJob({ text: "Drawing chart…" });
+    try {
+      const title = await plotColumns({ source: src, xIndex: c.xIndex, yIndexes: c.yIndexes, kind: c.kind, title: c.title });
+      toast("success", "Chart created", `${title} · ${c.yIndexes.length} series on ${src.sheetName}`);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
   const simple = (fn: () => Promise<string>, title: string) => async () => {
     try {
       const r = await fn();
@@ -564,6 +593,7 @@ export default function App() {
           onProductionQc={onProductionQc}
           onUnits={() => setUnitOpen(true)}
           onEspCheck={onEspCheck}
+          onDraw={openDraw}
         />
 
         {job && (
@@ -601,6 +631,7 @@ export default function App() {
         <ChartDialog open={chartOpen} onClose={() => setChartOpen(false)} onRun={onChart} />
         <UnitDialog open={unitOpen} onClose={() => setUnitOpen(false)} onRun={onUnits} />
         <DeclineCurveDialog open={!!dcaHeaders} headers={dcaHeaders ?? []} onClose={() => setDcaHeaders(null)} onRun={onDeclineCurve} />
+        <DrawDialog source={plotSource} onClose={() => setPlotSource(null)} onRun={onDraw} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />
       </InsertActionsContext.Provider>
