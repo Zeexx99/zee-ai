@@ -533,31 +533,20 @@ export interface RemoveEmptySummary {
 }
 
 /**
- * Delete rows (or columns) whose every cell is blank, 0 or a null word (NULL, N/A, NaN…).
- * Works on the selection; when a single cell is selected it uses the whole sheet's data.
- * Cells are shifted only inside that block, so data beside it is never moved.
+ * Delete every row (or column) on the active sheet whose cells are all blank, 0 or a null word
+ * (NULL, N/A, NaN…). Always scans the sheet's whole data area – no selection needed.
  */
 export async function removeEmptyLines(kind: "rows" | "columns"): Promise<RemoveEmptySummary> {
   return run(async (ctx) => {
-    const sel = ctx.workbook.getSelectedRange();
-    sel.load("cellCount");
-    const sheet = sel.worksheet;
+    const sheet = ctx.workbook.worksheets.getActiveWorksheet();
     sheet.load("name");
     const used = sheet.getUsedRangeOrNullObject(true);
     used.load("address,rowIndex,columnIndex,rowCount,columnCount");
     await ctx.sync();
     if (used.isNullObject) throw new ExcelUserError("This sheet is empty.");
-
-    let b: Block;
-    if (sel.cellCount <= 1) {
-      b = blockOf(used);
-    } else {
-      const c = await loadClippedSelection(ctx);
-      if (c.isEmpty) throw new ExcelUserError("The selected cells are empty.");
-      b = c.block;
-    }
+    const b: Block = blockOf(used);
     const total = b.rowCount * b.columnCount;
-    if (total > CLEAN_MAX_CELLS) throw new ExcelUserError(`Select fewer than ${CLEAN_MAX_CELLS.toLocaleString()} cells at once.`);
+    if (total > CLEAN_MAX_CELLS) throw new ExcelUserError(`This sheet has more than ${CLEAN_MAX_CELLS.toLocaleString()} cells – too large to scan at once.`);
 
     const r = sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, b.rowCount, b.columnCount);
     r.load("values,formulas,numberFormat");
