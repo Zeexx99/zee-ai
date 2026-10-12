@@ -5,7 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import { common } from "lowlight";
 import excel from "highlight.js/lib/languages/excel";
 import { Button, Spinner, Tooltip } from "@fluentui/react-components";
-import { Add16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, ErrorCircle16Regular, Eye16Regular, Prohibited16Regular, Warning16Regular, Wrench16Regular } from "@fluentui/react-icons";
+import { Add16Regular, ArrowRight16Regular, Attach16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, DocumentPdf16Regular, ErrorCircle16Regular, Eye16Regular, Globe16Regular, Image16Regular, Prohibited16Regular, Warning16Regular, Wrench16Regular } from "@fluentui/react-icons";
 import type { ActionLog, ChatMessage, PendingApproval } from "../hooks/useChat";
 import { formulasFromCode, hastTableToMatrix, hastText, parseDelimited, type HastLike } from "../utils/markdown";
 import { copyText, openExternal, useInsertActions } from "./insertActions";
@@ -90,6 +90,7 @@ function TableBlock({ node, children, streaming }: { node?: HastLike; children: 
 }
 
 const ACTION_ICON: Record<ActionLog["status"], JSX.Element> = {
+  running: <Spinner size="extra-tiny" />,
   done: <Checkmark16Regular />,
   read: <Eye16Regular />,
   rejected: <Prohibited16Regular />,
@@ -155,6 +156,46 @@ function ApprovalCard({ pending }: { pending: PendingApproval }) {
   );
 }
 
+function SourceList({ sources }: { sources: NonNullable<ChatMessage["sources"]> }) {
+  return (
+    <div className="zee-sources">
+      <span className="zee-sources-title">
+        <Globe16Regular /> Sources
+      </span>
+      <ol>
+        {sources.slice(0, 10).map((src) => (
+          <li key={src.uri}>
+            <a
+              href={src.uri}
+              onClick={(e) => {
+                e.preventDefault();
+                openExternal(src.uri);
+              }}
+            >
+              {src.title}
+            </a>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function ContinueButton() {
+  const actions = useInsertActions();
+  return (
+    <div className="zee-row zee-continue">
+      <Button size="small" appearance="primary" icon={<ArrowRight16Regular />} onClick={() => actions.continueAgent()}>
+        Continue
+      </Button>
+    </div>
+  );
+}
+
+function formatSize(bytes: number): string {
+  return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`;
+}
+
 function formatTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
@@ -197,6 +238,11 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
     return (
       <div className="zee-msg zee-msg-user">
         <div className="zee-bubble">{message.text}</div>
+        {message.attachments?.map((a) => (
+          <div key={a.name} className="zee-chip" title={`${a.mimeType} · ${formatSize(a.size)}`}>
+            {a.mimeType === "application/pdf" ? <DocumentPdf16Regular /> : a.mimeType.startsWith("image/") ? <Image16Regular /> : <Attach16Regular />} {a.name}
+          </div>
+        ))}
         {message.contextLabel && <div className="zee-chip">📎 {message.contextLabel}</div>}
       </div>
     );
@@ -229,6 +275,8 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
         ) : null}
         {streaming && message.text && <span className="zee-caret" />}
       </div>
+      {!streaming && message.sources && message.sources.length > 0 && <SourceList sources={message.sources} />}
+      {!streaming && message.canContinue && <ContinueButton />}
       {!streaming && (
         <div className="zee-meta">
           {message.model && <span>{modelLabel(message.model)}</span>}

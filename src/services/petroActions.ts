@@ -7,6 +7,7 @@ import {
   createChart,
   createScatterSeriesChart,
   formatRangeAt,
+  readBlockAt,
   readRangeValues,
   readSelectionBlock,
   readSourceColumns,
@@ -208,8 +209,9 @@ export interface QcResult {
   columns: number;
 }
 
-export async function runProductionQc(): Promise<QcResult> {
-  const blk = await readSelectionBlock(200_000);
+/** QC the selection, or any range when `source` is given (agent mode). */
+export async function runProductionQc(source?: { address: string; sheet?: string }): Promise<QcResult> {
+  const blk = source ? await readBlockAt(source.address, source.sheet, 200_000) : await readSelectionBlock(200_000);
   const header = hasHeaderRow(blk.values);
   const values = header ? blk.values : [blk.values[0].map((_, j) => `Column ${j + 1}`), ...blk.values];
   const texts = header ? blk.text.slice(1) : blk.text;

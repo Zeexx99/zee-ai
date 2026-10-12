@@ -51,6 +51,7 @@ import { FunctionDialog, type ApplyWhere, type FunctionDialogState } from "./com
 import { buildFormula, canApplyDirectly, guessHeader, inputCount, type FnSpec } from "./functions/catalog";
 
 import { isConfigured, loadSettings, modelLabel, saveSettings, type ZeeSettings } from "./services/settingsService";
+import type { Attachment } from "./services/geminiService";
 import {
   AGGREGATE_LABELS,
   OverwriteRequiredError,
@@ -214,7 +215,7 @@ export default function App() {
     [askConfirm]
   );
 
-  const { messages, busy, send, stop, clear, respondToApproval } = useChat({ getSettings, onUsage: addUsage, confirmLarge });
+  const { messages, busy, send, stop, clear, respondToApproval, continueAgent } = useChat({ getSettings, onUsage: addUsage, confirmLarge });
 
   /** Run a write; if it would overwrite data, ask first and retry with overwrite=true. */
   const withOverwrite = useCallback(
@@ -271,10 +272,12 @@ export default function App() {
   }, [inExcel]);
 
   const sendChat = useCallback(
-    async (text: string) => {
+    async (text: string, attachments?: Attachment[]) => {
       if (!ensureConfigured()) return;
       const [[ctx, label], overview] = await Promise.all([selectionContext(), workbookContext()]);
-      await send({ display: text, prompt: text + ctx + overview, contextLabel: label });
+      const display = text || (attachments?.length ? "(see attached)" : "");
+      const ask = text || "Extract the content of the attached file(s). Put tables in markdown tables so they can be inserted.";
+      await send({ display, prompt: ask + ctx + overview, contextLabel: label, attachments });
     },
     [ensureConfigured, selectionContext, send, workbookContext]
   );
@@ -299,8 +302,9 @@ export default function App() {
         }
       },
       respondToApproval,
+      continueAgent,
     }),
-    [respondToApproval, toast, toastError, withOverwrite]
+    [continueAgent, respondToApproval, toast, toastError, withOverwrite]
   );
 
   /* ------------------------------------------------------------ export chat */

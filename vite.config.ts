@@ -54,7 +54,9 @@ export default defineConfig(async ({ command }) => {
     preview: { port: 3100, strictPort: true, https },
     build: {
       outDir: "dist",
-      sourcemap: true,
+      // No source maps in the published build: they were ~15 MB on GitHub Pages and only help when debugging.
+      // Run `npx vite build --sourcemap` locally if you need them.
+      sourcemap: false,
       chunkSizeWarningLimit: 900,
       rollupOptions: {
         input: { taskpane: fileURLToPath(new URL("./taskpane.html", import.meta.url)) },

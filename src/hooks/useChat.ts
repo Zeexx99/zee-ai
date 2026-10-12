@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { agentStep, estimateTokens, GeminiError, streamChat, type ChatTurn, type GeminiContent, type Usage } from "../services/geminiService";
+import { agentStep, estimateTokens, GeminiError, streamChat, turnToContent, type Attachment, type ChatTurn, type GeminiContent, type Source, type Usage } from "../services/geminiService";
 import type { ZeeSettings } from "../services/settingsService";
 import { SYSTEM_PROMPT } from "../services/prompts";
-import { AGENT_SYSTEM_PROMPT, AGENT_TOOLS, WRITE_TOOLS, describeCall, executeTool, previewCall, type ToolCall } from "../services/agentService";
+import { AGENT_SYSTEM_PROMPT, WRITE_TOOLS, agentTools, describeCall, executeTool, previewCall } from "../services/agentService";
+import { runAgentLoop, type ActionLog } from "../services/agentLoop";
 import { clearChat, getDocId, loadChat, saveChat } from "../services/chatStore";
 import { invalidateOverview, writeTargetHasData } from "../services/excelService";
 
-export interface ActionLog {
-  description: string;
-  status: "done" | "rejected" | "error" | "read";
-  detail?: string;
+export type { ActionLog };
+
+/** What chat history keeps about an attachment (the file itself is never stored). */
+export interface AttachmentInfo {
+  name: string;
+  mimeType: string;
+  size: number;
 }
 
 export interface PendingApproval {
@@ -31,6 +35,12 @@ export interface ChatMessage {
   usage?: Usage;
   actions?: ActionLog[];
   pending?: PendingApproval;
+  /** Files sent with a user message (names only). */
+  attachments?: AttachmentInfo[];
+  /** Web pages a grounded answer used. */
+  sources?: Source[];
+  /** The agent stopped at its step limit – show a Continue button. */
+  canContinue?: boolean;
 }
 
 export interface SendInput {
@@ -39,6 +49,10 @@ export interface SendInput {
   contextLabel?: string;
   /** Force plain chat even when agent mode is on (quick actions that only need an answer). */
   forceChat?: boolean;
+  /** Force agent mode (e.g. "Continue" after the step limit). */
+  forceAgent?: boolean;
+  /** Images / PDFs to send with this message. */
+  attachments?: Attachment[];
 }
 
 export interface ChatHookOptions {
@@ -49,10 +63,13 @@ export interface ChatHookOptions {
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-const MAX_AGENT_STEPS = 12;
+export const MAX_AGENT_STEPS = 15;
 
-/** Build alternating user/model history; older turns drop their bulky sheet context. */
-function buildHistory(messages: ChatMessage[], next: string): ChatTurn[] {
+/**
+ * Build alternating user/model history; older turns drop their bulky sheet context.
+ * Only the new message carries attachments – earlier ones are mentioned by name.
+ */
+export function buildHistory(messages: ChatMessage[], next: string, attachments?: Attachment[]): ChatTurn[] {
   const turns: ChatTurn[] = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
@@ -60,7 +77,8 @@ function buildHistory(messages: ChatMessage[], next: string): ChatTurn[] {
     if (m.role === "assistant" && m.status === "done" && prev?.role === "user") {
       const actions = m.actions?.filter((a) => a.status === "done").map((a) => a.description);
       const modelText = actions?.length ? `${m.text}\n\n(Actions performed: ${actions.join("; ")})` : m.text;
-      turns.push({ role: "user", text: prev.promptText ?? prev.text }, { role: "model", text: modelText || "(no text)" });
+      const files = prev.attachments?.length ? `\n\n(Attached earlier: ${prev.attachments.map((a) => a.name).join(", ")} – no longer available)` : "";
+      turns.push({ role: "user", text: (prev.promptText ?? prev.text) + files }, { role: "model", text: modelText || "(no text)" });
     }
   }
   const recent = turns.slice(-16);
@@ -69,7 +87,12 @@ function buildHistory(messages: ChatMessage[], next: string): ChatTurn[] {
     const idx = t.text.search(/\n\n\[(Excel selection|Workbook overview)\]/);
     return idx > 0 ? { ...t, text: `${t.text.slice(0, idx)}\n\n(sheet context omitted)` } : t;
   });
-  return [...compacted, { role: "user", text: next }];
+  return [...compacted, { role: "user", text: next, ...(attachments?.length ? { attachments } : {}) }];
+}
+
+/** Rough token cost of attachments for the cost guard (images ≈ 1.1k tokens, PDFs ≈ 258 per page, ~1 page per 60 KB). */
+export function attachmentTokens(files: Attachment[] | undefined): number {
+  return (files ?? []).reduce((n, f) => n + (f.mimeType === "application/pdf" ? Math.max(258, Math.round(f.size / 60_000) * 258) : 1100), 0);
 }
 
 export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions) {
@@ -119,12 +142,13 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
     async (input: SendInput, mode: "chat" | "agent") => {
       if (abortRef.current) return null;
       const settings = getSettings();
-      const history = buildHistory(messagesRef.current, input.prompt);
-      const tokens = estimateTokens(history.map((h) => h.text).join("\n") + (mode === "agent" ? AGENT_SYSTEM_PROMPT : SYSTEM_PROMPT));
+      const history = buildHistory(messagesRef.current, input.prompt, input.attachments);
+      const tokens = estimateTokens(history.map((h) => h.text).join("\n") + (mode === "agent" ? AGENT_SYSTEM_PROMPT : SYSTEM_PROMPT)) + attachmentTokens(input.attachments);
       if (settings.costGuardTokens > 0 && tokens > settings.costGuardTokens) {
         if (!(await confirmLarge(tokens))) return null;
       }
-      const userMsg: ChatMessage = { id: uid(), role: "user", text: input.display, promptText: input.prompt, contextLabel: input.contextLabel, status: "done", mode };
+      const attachments = input.attachments?.map(({ name, mimeType, size }) => ({ name, mimeType, size }));
+      const userMsg: ChatMessage = { id: uid(), role: "user", text: input.display, promptText: input.prompt, contextLabel: input.contextLabel, status: "done", mode, ...(attachments?.length ? { attachments } : {}) };
       const asstId = uid();
       update((m) => [...m, userMsg, { id: asstId, role: "assistant", text: "", status: "streaming", model: settings.model, mode, actions: mode === "agent" ? [] : undefined }]);
       const controller = new AbortController();
@@ -178,13 +202,14 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
           history,
           systemInstruction: SYSTEM_PROMPT,
           signal: controller.signal,
+          useBuiltinTools: true,
           onText: (full) => {
             pending = full;
             if (!frame) frame = requestAnimationFrame(flush);
           },
         });
         if (frame) cancelAnimationFrame(frame);
-        patch(asstId, { text: result.text || "_(empty response)_", status: "done", usage: result.usage });
+        patch(asstId, { text: result.text || "_(empty response)_", status: "done", usage: result.usage, ...(result.sources ? { sources: result.sources } : {}) });
         if (result.usage) onUsage(result.usage);
       } catch (e) {
         if (frame) cancelAnimationFrame(frame);
@@ -202,58 +227,67 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
       const ctx = await begin(input, "agent");
       if (!ctx) return;
       const { settings, history, asstId, controller } = ctx;
-      const contents: GeminiContent[] = history.map((t) => ({ role: t.role, parts: [{ text: t.text }] }));
-      const total: Usage = { promptTokens: 0, outputTokens: 0, totalTokens: 0 };
-      const log = (entry: ActionLog) => patch(asstId, (x) => ({ actions: [...(x.actions ?? []), entry] }));
-      try {
-        for (let step = 0; step < MAX_AGENT_STEPS; step++) {
-          const res = await agentStep({ settings, contents, systemInstruction: AGENT_SYSTEM_PROMPT, tools: AGENT_TOOLS, signal: controller.signal });
-          if (res.usage) {
-            total.promptTokens += res.usage.promptTokens;
-            total.outputTokens += res.usage.outputTokens;
-            total.totalTokens += res.usage.totalTokens;
-            onUsage(res.usage);
-          }
-          contents.push(res.content);
-          if (res.text) patch(asstId, { text: res.text });
-          if (!res.calls.length) {
-            patch(asstId, { text: res.text || "_Done._", status: "done", usage: total });
-            return;
-          }
+      const contents: GeminiContent[] = history.map(turnToContent);
+      const tools = agentTools(settings);
+      let actionCount = 0;
 
-          const calls: ToolCall[] = res.calls;
-          const writes = calls.filter((c) => WRITE_TOOLS.has(c.name));
-          let approved = true;
-          if (writes.length && !getSettings().autoApprove) {
+      // Stream the model's text, at most once per animation frame.
+      let pendingText: string | null = null;
+      let frame = 0;
+      const flush = () => {
+        frame = 0;
+        if (pendingText === null) return;
+        const text = pendingText;
+        pendingText = null;
+        patch(asstId, { text });
+      };
+      const onText = (t: string) => {
+        pendingText = t;
+        if (!frame) frame = requestAnimationFrame(flush);
+      };
+
+      try {
+        const result = await runAgentLoop(contents, {
+          step: (c, cb) => agentStep({ settings, contents: c, systemInstruction: AGENT_SYSTEM_PROMPT, tools, signal: controller.signal, onText: cb }),
+          execute: (call) => executeTool(call, { settings, signal: controller.signal }),
+          isWrite: (name) => WRITE_TOOLS.has(name),
+          describe: describeCall,
+          autoApprove: () => getSettings().autoApprove,
+          approve: async (writes) => {
             const overwrites = await Promise.all(writes.map((c) => (c.name === "set_cells" ? writeTargetHasData(c.args).catch(() => null) : Promise.resolve(null))));
             patch(asstId, { pending: { calls: writes.map((c, i) => ({ description: describeCall(c), preview: previewCall(c), overwrites: overwrites[i] })) } });
-            approved = await new Promise<boolean>((resolve) => {
+            const ok = await new Promise<boolean>((resolve) => {
               approvalRef.current = resolve;
               controller.signal.addEventListener("abort", () => resolve(false), { once: true });
             });
             approvalRef.current = null;
             patch(asstId, { pending: undefined });
-            if (controller.signal.aborted) throw new GeminiError("Stopped.", "aborted");
-          }
-
-          const responses: GeminiContent = { role: "user", parts: [] };
-          for (const c of calls) {
-            const isWrite = WRITE_TOOLS.has(c.name);
-            let result: Record<string, unknown>;
-            if (isWrite && !approved) {
-              result = { error: "The user rejected this change. Do not retry it; ask what they want instead." };
-              log({ description: describeCall(c), status: "rejected" });
-            } else {
-              result = await executeTool(c);
-              log({ description: describeCall(c), status: result.error ? "error" : isWrite ? "done" : "read", detail: result.error ? String(result.error) : undefined });
-            }
-            responses.parts.push({ functionResponse: { name: c.name, response: result, ...(c.id ? { id: c.id } : {}) } });
-          }
-          if (writes.length) invalidateOverview();
-          contents.push(responses);
-        }
-        patch(asstId, (x) => ({ text: `${x.text}\n\n_Stopped after ${MAX_AGENT_STEPS} steps. Ask me to continue if needed._`, status: "done", usage: total }));
+            return ok;
+          },
+          onText,
+          // Track indexes locally: React may run state updaters later, so we can't read them back.
+          startAction: (entry) => {
+            const index = actionCount++;
+            patch(asstId, (x) => ({ actions: [...(x.actions ?? []), entry] }));
+            return index;
+          },
+          finishAction: (index, entry) => patch(asstId, (x) => ({ actions: (x.actions ?? []).map((a, i) => (i === index ? entry : a)) })),
+          onUsage,
+          afterWrites: invalidateOverview,
+          signal: controller.signal,
+          maxSteps: MAX_AGENT_STEPS,
+        });
+        if (frame) cancelAnimationFrame(frame);
+        patch(asstId, {
+          text: result.hitStepLimit
+            ? `${result.text}\n\n_Paused after ${MAX_AGENT_STEPS} steps – click **Continue** to let me keep going._`
+            : result.text || "_Done._",
+          status: "done",
+          usage: result.usage,
+          canContinue: result.hitStepLimit,
+        });
       } catch (e) {
+        if (frame) cancelAnimationFrame(frame);
         fail(asstId, e);
       } finally {
         finish();
@@ -263,9 +297,15 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
   );
 
   const send = useCallback(
-    (input: SendInput) => (getSettings().agentMode && !input.forceChat ? sendAgent(input) : sendChat(input)),
+    (input: SendInput) => ((getSettings().agentMode || input.forceAgent) && !input.forceChat ? sendAgent(input) : sendChat(input)),
     [getSettings, sendAgent, sendChat]
   );
+
+  /** "Continue" after the agent paused at its step limit. */
+  const continueAgent = useCallback(() => {
+    update((list) => list.map((m) => (m.canContinue ? { ...m, canContinue: false } : m)));
+    return send({ display: "Continue", prompt: "Continue the task where you left off. Check the workbook state first if needed.", forceAgent: true });
+  }, [send, update]);
 
   const respondToApproval = useCallback((approved: boolean) => approvalRef.current?.(approved), []);
   const stop = useCallback(() => abortRef.current?.abort(), []);
@@ -275,5 +315,5 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
     update(() => []);
   }, [update]);
 
-  return { messages, busy, send, stop, clear, respondToApproval };
+  return { messages, busy, send, stop, clear, respondToApproval, continueAgent };
 }

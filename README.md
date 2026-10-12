@@ -7,8 +7,10 @@ Zee AI is an Excel task-pane add-in (Windows, Mac, Excel on the web) built with 
 | | |
 |---|---|
 | **Chat** | Streaming answers with Markdown and code highlighting. It sees your selection (with real cell addresses) and, optionally, a map of every sheet (names, headers, tables, named ranges). |
-| **Agent mode** | Toggle **Agent** above the input box. Gemini can read ranges, write values/formulas, format, create charts, tables and sheets, and fit decline curves. **Every change is listed for your approval** (with a preview of the values) and can be undone. |
-| **Multi-step undo** | ↶ reverts Zee AI's changes one step at a time (up to 25). It covers cells, inserted columns, new sheets, charts and tables. Formatting is not covered. |
+| **Agent mode** | Toggle **Agent** above the input box. Gemini can read and find cells, write values/formulas, format, insert/delete rows and columns, clear, copy, sort, filter, find & replace, freeze panes, add conditional formatting, data validation (drop-downs), named ranges, PivotTables, charts, tables and sheets. Petroleum tools: decline-curve fit, production QC report, unit-conversion columns and ESP analysis. **Every change is listed for your approval** (with a preview of the values) and can be undone. You see each step live while it works; if it reaches its step limit, click **Continue**. |
+| **Attachments** | Click 📎, paste a screenshot (Ctrl+V) or drop files on the input: images (PNG, JPG, WebP, HEIC) and PDFs, up to 5 files / 14 MB per message. Ask e.g. "digitise this pump curve into a table" or "extract the well-test results". Files are sent with that message only and are not saved in the chat history. |
+| **Web search & Python** | Settings → **Gemini tools**. *Search the web* grounds answers in Google Search and lists the sources (in agent mode it becomes a `web_search` tool). *Run Python* lets Gemini calculate with code; the code and its output appear in the answer. Both are off by default. |
+| **Multi-step undo** | ↶ reverts Zee AI's changes one step at a time (up to 25). It covers cells, formatting (ranges up to 20,000 cells), inserted/deleted rows and columns, sorts, find & replace, conditional formats, validation, names, freeze panes, filters, new sheets, charts and tables. |
 | **Functions drop list** | Click **Functions** in the toolbar. Every `=ZEE.*` function is listed with a one-line description. If cells with data are selected, clicking a function fills a new column of formulas to the right (one per row). Otherwise it inserts the formula into the active cell. When a function needs input, such as categories or units, a small form asks for it and previews the formula. **Freeze results** turns formulas into fixed values so they stop calling Gemini. |
 | **AI worksheet functions** | `ZEE.ASK`, `ZEE.EXTRACT`, `ZEE.CLASSIFY`, `ZEE.CLEAN`, `ZEE.TRANSLATE`, `ZEE.SUMMARIZE`, `ZEE.FLAG` (spills one flag per row), `ZEE.FORMULA`, and `ZEE.EXPLAIN`. They avoid spamming Gemini: answers are cached, filled-down cells are batched 25 rows per request with at most 4 requests at a time, and empty cells are never sent. |
 | **Field functions (no AI, free)** | `ZEE.UNITS(value, "from", "to")` converts psi, bar, kPa, bbl/d, m3/d, Mscf/d, °F/°C, API/SG, psi/ft, hp/kW and more. The others are `ZEE.CONVERT`, `VOGEL`, `VOGEL_QMAX`, `PI`, `RS`, `PB`, `BO`, `ARPS`, `ARPS_CUM`, `TDH`, `HHP`, `AFFINITY` and `SG_MIX`. |
@@ -17,9 +19,9 @@ Zee AI is an Excel task-pane add-in (Windows, Mac, Excel on the web) built with 
 | **Clean** | Trim, remove hidden characters, convert numbers stored as text, fix case, fix dates. Also Split / Extract (names, emails, phones, or a custom AI instruction per row), Format as table. **Remove empty columns** and **Remove empty rows** delete columns/rows that are entirely blank, 0 or NULL/N/A/NaN (scans the whole sheet automatically – no selection needed; a header cell is ignored for columns; undoable). **Auto-fit all columns** fits every column on the sheet, and Zee AI auto-fits all columns after every write. |
 | **Analyze** | Explain the formula in the active cell, generate a formula, summarize the selection, **chart from selection**. |
 | **Petroleum** | **Decline curve analysis**: Arps exponential, harmonic and hyperbolic fit, a forecast, time-to-limit and EUR, and a chart on a new sheet. **Production data QC**: missing, negative, outlier and stuck-gauge values, and date gaps or duplicates, reported on a new sheet. **Unit conversion**: bbl↔m³, Mscf/d→m³/d, psi↔bar/kPa, °F↔°C, ft↔m, °API↔SG, hp↔kW. **ESP performance check**: an AI diagnosis covering TDH, affinity laws, operating range, gas interference and more. |
-| **Per-workbook history** | The chat is saved for each workbook and comes back when you reopen it. |
+| **Per-workbook history** | The chat is saved for each workbook and comes back when you reopen it. When browser storage fills up, the oldest messages are dropped first. |
 | **Cost guard** | Asks before sending a very large prompt, and before running AI on many rows. It also shows token usage per message and per session. |
-| **Auth** | Gemini API key, Google sign-in (Vertex AI quota), or a **team proxy** that keeps the key on a server (`proxy/`). |
+| **Auth** | Gemini API key, Google sign-in (Vertex AI quota), or a **team proxy** that keeps the key on a server (`proxy/`), with per-person tokens, an origin lock, a daily request cap and a size limit. |
 
 ---
 
@@ -73,16 +75,18 @@ public/                      icons, OAuth dialog pages, functions.json (custom-f
 proxy/                       Optional Cloudflare Worker team proxy
 src/
   App.tsx                    UI orchestration, quick actions, dialogs, confirmations
-  hooks/useChat.ts           Chat + agent loop (tool calls, approvals), cost guard, history
+  hooks/useChat.ts           Chat + agent wiring (approvals, streaming, Continue), cost guard, history
   services/
+    agentLoop.ts             The agent loop (model step → tools → approval → repeat), retries; unit-tested
     agentService.ts          Agent tools (declarations, descriptions, execution)
-    excelService.ts          Office.js helpers: context, writes, undo stack, charts, tables, sheets
+    workbookOps.ts           Agent workbook operations: rows/columns, sort, filter, find/replace, CF, validation, names, PivotTables
+    excelService.ts          Office.js helpers: context, writes, undo stack (incl. formatting), charts, tables, sheets
     geminiService.ts         REST client: streaming, JSON mode, tool calling, retries, proxy/Vertex/key
     petroActions.ts          Decline-curve and QC report sheets, ESP prompt
     chatStore.ts             Per-workbook chat history
     settingsService.ts / authService.ts / prompts.ts
   functions/zeeFunctions.ts  =ZEE.ASK() implementation (cache + throttling)
-  utils/                     Pure, unit-tested helpers (A1, clean, extract, markdown, SSE, petro)
+  utils/                     Pure, unit-tested helpers (A1, clean, extract, markdown, SSE, petro, agent arguments, attachments)
 ```
 
 ## Troubleshooting

@@ -7,6 +7,8 @@ export interface InsertActions {
   insertTable: (matrix: Cell[][]) => Promise<void>;
   /** Agent mode: approve or reject the pending batch of workbook changes. */
   respondToApproval: (approved: boolean) => void;
+  /** Agent mode: keep going after the step limit. */
+  continueAgent: () => void;
 }
 
 export const InsertActionsContext = createContext<InsertActions | null>(null);

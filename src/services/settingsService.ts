@@ -57,6 +57,10 @@ export interface ZeeSettings {
   autoApprove: boolean;
   /** Appearance of the task pane. */
   theme: ThemeMode;
+  /** Let Gemini search the web (Google Search grounding) – chat answers cite sources; the agent gets a web_search tool. */
+  webSearch: boolean;
+  /** Let Gemini write and run Python for calculations in chat (code execution). */
+  codeExecution: boolean;
 }
 
 export const DEFAULT_SETTINGS: ZeeSettings = {
@@ -77,6 +81,8 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   agentMode: true,
   autoApprove: false,
   theme: "auto",
+  webSearch: false,
+  codeExecution: false,
 };
 
 const STORAGE_KEY = "zeeai.settings.v1";

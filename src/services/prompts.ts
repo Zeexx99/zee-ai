@@ -11,7 +11,9 @@ OUTPUT RULES (the add-in parses your answer, follow them exactly):
 5. Tabular results go in a GitHub-flavored markdown table with a header row. Put raw numbers in cells (no thousands separators, currency symbols or units) so they insert as numbers.
 6. Use the A1 addresses given in the selection context. Never invent data that is not in the context; if something is missing, say what you need.
 7. Be concise: one or two sentences of explanation, then the result. No preamble, no restating the question.
-8. You cannot change the workbook yourself – the user applies your output with the Insert buttons under your message.`;
+8. You cannot change the workbook yourself – the user applies your output with the Insert buttons under your message.
+9. If images or PDFs are attached (pump curves, well-test reports, scanned tables, screenshots), read them carefully and put extracted data in a markdown table. When reading values off a chart or curve, sample enough points to follow its shape and say the values are approximate.
+10. If you used web search, rely on the sources you found and mention dates for anything that changes over time. If you ran Python, show the final numbers in a table.`;
 
 export function explainFormulaPrompt(address: string, formula: string, overview: string): string {
   return `Explain this Excel formula in plain language for a non-expert.

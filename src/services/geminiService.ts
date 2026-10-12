@@ -8,9 +8,26 @@ import type { ZeeSettings } from "./settingsService";
 import { getValidGoogleToken } from "./authService";
 import { SseParser } from "../utils/sse";
 
+/** A file sent with a message (image or PDF), base64-encoded. Never persisted in chat history. */
+export interface Attachment {
+  name: string;
+  mimeType: string;
+  /** Base64 without the data: prefix. */
+  data: string;
+  size: number;
+}
+
 export interface ChatTurn {
   role: "user" | "model";
   text: string;
+  /** Images / PDFs sent inline with this turn (only the newest user turn carries them). */
+  attachments?: Attachment[];
+}
+
+/** A web page Gemini used for a grounded (Google Search) answer. */
+export interface Source {
+  title: string;
+  uri: string;
 }
 
 export interface Usage {
@@ -73,13 +90,22 @@ function resolveEndpoint(s: ZeeSettings, model: string): Endpoint {
   };
 }
 
+/** Gemini content for one chat turn: attachments first (as inline data), then the text. */
+export function turnToContent(t: ChatTurn): GeminiContent {
+  const files: GeminiPart[] = (t.attachments ?? []).map((a) => ({ inlineData: { mimeType: a.mimeType, data: a.data } }));
+  return { role: t.role, parts: [...files, { text: t.text }] };
+}
+
 function buildBody(history: ChatTurn[], systemInstruction: string, s: ZeeSettings, extraConfig: Record<string, unknown> = {}) {
-  return buildRawBody(
-    history.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
-    systemInstruction,
-    s,
-    extraConfig
-  );
+  return buildRawBody(history.map(turnToContent), systemInstruction, s, extraConfig);
+}
+
+/** Gemini built-in tools for plain chat, from Settings (Google Search grounding, Python code execution). */
+export function builtinTools(s: Pick<ZeeSettings, "webSearch" | "codeExecution">): Array<Record<string, unknown>> {
+  const tools: Array<Record<string, unknown>> = [];
+  if (s.webSearch) tools.push({ googleSearch: {} });
+  if (s.codeExecution) tools.push({ codeExecution: {} });
+  return tools;
 }
 
 function buildRawBody(contents: GeminiContent[], systemInstruction: string, s: ZeeSettings, extraConfig: Record<string, unknown> = {}) {
@@ -97,6 +123,9 @@ export interface GeminiPart {
   text?: string;
   thought?: boolean;
   thoughtSignature?: string;
+  inlineData?: { mimeType: string; data: string };
+  executableCode?: { language?: string; code: string };
+  codeExecutionResult?: { outcome?: string; output?: string };
   functionCall?: { name: string; args?: Record<string, unknown>; id?: string };
   functionResponse?: { name: string; response: Record<string, unknown>; id?: string };
 }
@@ -201,19 +230,55 @@ async function fetchWithRetry(url: string, init: RequestInit, model: string, ret
 interface Candidate {
   content?: { role?: string; parts?: GeminiPart[] };
   finishReason?: string;
+  groundingMetadata?: { groundingChunks?: Array<{ web?: { uri?: string; title?: string } }> };
 }
-interface GenerateResponse {
+export interface GenerateResponse {
   candidates?: Candidate[];
   promptFeedback?: { blockReason?: string };
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; thoughtsTokenCount?: number };
   error?: { message?: string };
 }
 
-function textOf(r: GenerateResponse): string {
-  return (r.candidates?.[0]?.content?.parts ?? [])
-    .filter((p) => !p.thought && typeof p.text === "string")
-    .map((p) => p.text)
+/**
+ * Visible text of response parts. Code-execution parts are rendered as Markdown code blocks so the
+ * Python Gemini ran and its output show up in the chat.
+ */
+export function partsToMarkdown(parts: GeminiPart[]): string {
+  return parts
+    .map((p) => {
+      if (p.thought) return "";
+      if (p.executableCode?.code) return `\n\n\`\`\`${(p.executableCode.language ?? "python").toLowerCase()}\n${p.executableCode.code.replace(/\n$/, "")}\n\`\`\`\n\n`;
+      if (p.codeExecutionResult) {
+        const out = (p.codeExecutionResult.output ?? "").replace(/\n$/, "");
+        const ok = !p.codeExecutionResult.outcome || p.codeExecutionResult.outcome === "OUTCOME_OK";
+        return out || !ok ? `\n\n\`\`\`text\n${ok ? "" : `(${p.codeExecutionResult.outcome})\n`}${out}\n\`\`\`\n\n` : "";
+      }
+      return typeof p.text === "string" ? p.text : "";
+    })
     .join("");
+}
+
+function textOf(r: GenerateResponse): string {
+  return partsToMarkdown(r.candidates?.[0]?.content?.parts ?? []);
+}
+
+/** Web sources from a grounded answer (deduplicated by URL). */
+export function groundingSources(r: GenerateResponse): Source[] {
+  const seen = new Set<string>();
+  const out: Source[] = [];
+  for (const c of r.candidates?.[0]?.groundingMetadata?.groundingChunks ?? []) {
+    const uri = c.web?.uri;
+    if (!uri || seen.has(uri)) continue;
+    seen.add(uri);
+    let host = uri;
+    try {
+      host = new URL(uri).hostname;
+    } catch {
+      /* keep the raw URI */
+    }
+    out.push({ uri, title: c.web?.title || host });
+  }
+  return out;
 }
 
 function usageOf(r: GenerateResponse): Usage | undefined {
@@ -227,6 +292,8 @@ export interface StreamResult {
   text: string;
   usage?: Usage;
   finishReason?: string;
+  /** Web pages used when Google Search grounding was on. */
+  sources?: Source[];
 }
 
 export interface StreamOptions {
@@ -235,27 +302,22 @@ export interface StreamOptions {
   systemInstruction: string;
   signal?: AbortSignal;
   onText: (fullText: string) => void;
+  /** Enable Google Search / code execution as configured in Settings (plain chat only). */
+  useBuiltinTools?: boolean;
 }
 
-/** Stream a chat completion. Resolves with the full text when the stream ends. */
-export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
-  const { settings, signal } = opts;
+/**
+ * POST a streamGenerateContent request and hand every parsed SSE chunk to `onChunk`.
+ * Throws GeminiError on HTTP, stream and safety errors.
+ */
+async function streamRequest(settings: ZeeSettings, body: unknown, signal: AbortSignal | undefined, onChunk: (c: GenerateResponse) => void): Promise<void> {
   const model = settings.model;
   const ep = resolveEndpoint(settings, model);
-  const res = await fetchWithRetry(
-    `${ep.url("streamGenerateContent")}?alt=sse`,
-    { method: "POST", headers: ep.headers, body: JSON.stringify(buildBody(opts.history, opts.systemInstruction, settings)), signal },
-    model
-  );
+  const res = await fetchWithRetry(`${ep.url("streamGenerateContent")}?alt=sse`, { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal }, model);
   if (!res.body) throw new GeminiError("Streaming is not supported in this environment.", "unknown");
-
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const parser = new SseParser();
-  let full = "";
-  let usage: Usage | undefined;
-  let finishReason: string | undefined;
-
   const handle = (data: string) => {
     let chunk: GenerateResponse;
     try {
@@ -266,15 +328,8 @@ export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
     if (chunk.error) throw new GeminiError(chunk.error.message ?? "Gemini stream error", "server");
     if (chunk.promptFeedback?.blockReason)
       throw new GeminiError(`The request was blocked by Gemini safety filters (${chunk.promptFeedback.blockReason}).`, "safety");
-    const delta = textOf(chunk);
-    if (delta) {
-      full += delta;
-      opts.onText(full);
-    }
-    usage = usageOf(chunk) ?? usage;
-    finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
+    onChunk(chunk);
   };
-
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -285,15 +340,39 @@ export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
     parser.flush().forEach(handle);
   } catch (e) {
     if ((e as Error).name === "AbortError") throw new GeminiError("Stopped.", "aborted");
-    throw e;
+    if (e instanceof GeminiError) throw e;
+    // The connection dropped mid-stream (Wi-Fi, VPN, proxy timeout).
+    throw new GeminiError("The connection to Gemini dropped while answering. Please try again.", "network");
   }
+}
+
+/** Stream a chat completion. Resolves with the full text when the stream ends. */
+export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
+  const { settings, signal } = opts;
+  const tools = opts.useBuiltinTools ? builtinTools(settings) : [];
+  const body = { ...buildBody(opts.history, opts.systemInstruction, settings), ...(tools.length ? { tools } : {}) };
+  let full = "";
+  let usage: Usage | undefined;
+  let finishReason: string | undefined;
+  const sources: Source[] = [];
+
+  await streamRequest(settings, body, signal, (chunk) => {
+    const delta = textOf(chunk);
+    if (delta) {
+      full += delta;
+      opts.onText(full);
+    }
+    for (const src of groundingSources(chunk)) if (!sources.some((x) => x.uri === src.uri)) sources.push(src);
+    usage = usageOf(chunk) ?? usage;
+    finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
+  });
 
   if (!full && finishReason === "SAFETY") throw new GeminiError("The response was blocked by Gemini safety filters.", "safety");
   if (finishReason === "MAX_TOKENS") {
     full += "\n\n_…response truncated (max output tokens reached)._";
     opts.onText(full);
   }
-  return { text: full, usage, finishReason };
+  return { text: full, usage, finishReason, sources: sources.length ? sources : undefined };
 }
 
 /** One-shot JSON generation (used for bulk row transforms). */
@@ -390,40 +469,87 @@ export interface AgentStepResult {
   finishReason?: string;
 }
 
-/** One agent step: send the conversation + tool declarations, get text and/or function calls back. */
+/**
+ * Merge parts streamed in many chunks back into one model turn. Adjacent plain text pieces are joined;
+ * parts carrying a thought signature, function calls and other part types are kept exactly as received
+ * (Gemini needs the signatures back verbatim on the next request).
+ */
+export function mergeStreamedParts(parts: GeminiPart[]): GeminiPart[] {
+  const out: GeminiPart[] = [];
+  for (const p of parts) {
+    const prev = out[out.length - 1];
+    const plain = (x: GeminiPart | undefined) => !!x && typeof x.text === "string" && Object.keys(x).length === 1;
+    const plainThought = (x: GeminiPart | undefined) => !!x && typeof x.text === "string" && x.thought === true && Object.keys(x).length === 2;
+    if (plain(p) && plain(prev)) prev!.text += p.text!;
+    else if (plainThought(p) && plainThought(prev)) prev!.text += p.text!;
+    else out.push({ ...p });
+  }
+  return out;
+}
+
+/** Function calls in a model turn. */
+export function callsOf(parts: GeminiPart[]): Array<{ name: string; args: Record<string, unknown>; id?: string }> {
+  return parts.filter((p) => p.functionCall).map((p) => ({ name: p.functionCall!.name, args: p.functionCall!.args ?? {}, id: p.functionCall!.id }));
+}
+
+/**
+ * One agent step: send the conversation + tool declarations, get text and/or function calls back.
+ * Streams, so `onText` can show the model's explanation while it is still being written.
+ */
 export async function agentStep(opts: {
   settings: ZeeSettings;
   contents: GeminiContent[];
   systemInstruction: string;
   tools: FunctionDeclaration[];
   signal?: AbortSignal;
+  onText?: (text: string) => void;
 }): Promise<AgentStepResult> {
   const { settings } = opts;
-  const ep = resolveEndpoint(settings, settings.model);
   const body = {
     ...buildRawBody(opts.contents, opts.systemInstruction, settings),
     tools: [{ functionDeclarations: opts.tools }],
     toolConfig: { functionCallingConfig: { mode: "AUTO" } },
   };
-  const res = await fetchWithRetry(
-    ep.url("generateContent"),
-    { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal: opts.signal },
-    settings.model,
-    2
-  );
-  const json = (await res.json()) as GenerateResponse;
-  if (json.promptFeedback?.blockReason) throw new GeminiError(`Blocked by safety filters (${json.promptFeedback.blockReason}).`, "safety");
-  const cand = json.candidates?.[0];
-  const parts = cand?.content?.parts ?? [];
-  const calls = parts
-    .filter((p) => p.functionCall)
-    .map((p) => ({ name: p.functionCall!.name, args: p.functionCall!.args ?? {}, id: p.functionCall!.id }));
-  if (!parts.length && cand?.finishReason === "SAFETY") throw new GeminiError("The response was blocked by safety filters.", "safety");
+  const raw: GeminiPart[] = [];
+  let usage: Usage | undefined;
+  let finishReason: string | undefined;
+  let text = "";
+  await streamRequest(settings, body, opts.signal, (chunk) => {
+    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+    raw.push(...parts);
+    const delta = partsToMarkdown(parts);
+    if (delta) {
+      text += delta;
+      opts.onText?.(text);
+    }
+    usage = usageOf(chunk) ?? usage;
+    finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
+  });
+  const parts = mergeStreamedParts(raw);
+  if (!parts.length && finishReason === "SAFETY") throw new GeminiError("The response was blocked by safety filters.", "safety");
+  if (finishReason === "MALFORMED_FUNCTION_CALL" && !callsOf(parts).length)
+    throw new GeminiError("Gemini produced an invalid tool call.", "server");
   return {
     content: { role: "model", parts: parts.length ? parts : [{ text: "" }] },
-    text: textOf(json),
-    calls,
-    usage: usageOf(json),
-    finishReason: cand?.finishReason,
+    text,
+    calls: callsOf(parts),
+    usage,
+    finishReason,
   };
+}
+
+/**
+ * Answer a question with Google Search grounding (used by the agent's web_search tool, because
+ * Gemini can't mix built-in Search with function calling in one request on every model).
+ */
+export async function groundedSearch(opts: { settings: ZeeSettings; query: string; signal?: AbortSignal }): Promise<{ text: string; sources: Source[]; usage?: Usage }> {
+  const { settings } = opts;
+  const ep = resolveEndpoint(settings, settings.model);
+  const body = {
+    ...buildBody([{ role: "user", text: opts.query }], "Answer concisely with concrete facts, numbers and dates. Say when information may be out of date.", settings),
+    tools: [{ googleSearch: {} }],
+  };
+  const res = await fetchWithRetry(ep.url("generateContent"), { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal: opts.signal }, settings.model, 2);
+  const json = (await res.json()) as GenerateResponse;
+  return { text: textOf(json).trim(), sources: groundingSources(json), usage: usageOf(json) };
 }

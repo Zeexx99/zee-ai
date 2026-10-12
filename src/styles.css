@@ -697,3 +697,71 @@ body.zee-light {
   word-break: break-all;
   white-space: pre-wrap;
 }
+
+/* ---------------------------------------------------------------- attachments, sources, continue */
+.zee-input-drop {
+  outline: 2px dashed var(--zee-user);
+  outline-offset: -4px;
+}
+
+.zee-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 6px;
+  align-items: center;
+}
+
+.zee-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding-right: 0;
+}
+
+.zee-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.zee-attachment-error {
+  font-size: 11.5px;
+  color: #b42318;
+}
+.zee-dark .zee-attachment-error {
+  color: #ff9b91;
+}
+
+.zee-action-running {
+  color: var(--zee-text);
+}
+
+.zee-sources {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--zee-muted);
+}
+
+.zee-sources-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.zee-sources ol {
+  margin: 2px 0 0;
+  padding-left: 20px;
+}
+
+.zee-sources a {
+  color: var(--zee-user);
+  overflow-wrap: anywhere;
+}
+
+.zee-continue {
+  margin-top: 6px;
+}

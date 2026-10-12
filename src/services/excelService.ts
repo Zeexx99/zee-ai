@@ -63,7 +63,8 @@ function toUserError(e: unknown): Error {
   }
 }
 
-async function run<T>(fn: (ctx: Excel.RequestContext) => Promise<T>): Promise<T> {
+/** @internal Shared with workbookOps.ts. */
+export async function run<T>(fn: (ctx: Excel.RequestContext) => Promise<T>): Promise<T> {
   if (!isExcelAvailable()) throw new ExcelUserError("Open Zee AI inside Excel to work with your sheet.");
   try {
     return await Excel.run(fn);
@@ -76,7 +77,7 @@ async function run<T>(fn: (ctx: Excel.RequestContext) => Promise<T>): Promise<T>
  * Auto-fit EVERY used column of the sheet that holds `r` (not just the cells written).
  * Zee AI calls this after every write so all columns always fit their content. Queued; the caller syncs.
  */
-function autofitAllOf(r: Excel.Range) {
+export function autofitAllOf(r: Excel.Range) {
   r.worksheet.getUsedRange(true).getEntireColumn().format.autofitColumns();
 }
 
@@ -87,7 +88,19 @@ export type Snapshot =
   | { kind: "insertedColumn"; sheetName: string; columnAddress: string; label: string }
   | { kind: "addedSheet"; sheetName: string; label: string }
   | { kind: "addedChart"; sheetName: string; chartName: string; label: string }
-  | { kind: "addedTable"; tableName: string; label: string };
+  | { kind: "addedTable"; tableName: string; label: string }
+  | { kind: "insertedRows"; sheetName: string; rowAddress: string; label: string }
+  /** Whole rows/columns that were deleted: re-insert them and put their cell contents back. */
+  | { kind: "deletedLines"; sheetName: string; lines: "rows" | "columns"; start: number; count: number; contentAddress: string | null; formulas: unknown[][] | null; label: string }
+  /** Per-cell formatting (fill, font, borders, alignment, wrap) + number formats. */
+  | { kind: "format"; sheetName: string; address: string; props: Excel.SettableCellProperties[][]; numberFormat: unknown[][]; label: string }
+  | { kind: "addedConditionalFormat"; sheetName: string; address: string; id: string; label: string }
+  | { kind: "dataValidation"; sheetName: string; address: string; rule: Excel.DataValidationRule | null; label: string }
+  | { kind: "addedName"; name: string; label: string }
+  | { kind: "autoFilter"; sheetName: string; label: string }
+  | { kind: "freeze"; sheetName: string; previous: string | null; label: string }
+  /** Several snapshots taken by one operation; undone in reverse order. */
+  | { kind: "multi"; steps: Snapshot[]; label: string };
 
 const UNDO_LIMIT = 25;
 const undoStack: Snapshot[] = [];
@@ -98,7 +111,8 @@ function notifyUndo() {
   snapshotListeners.forEach((l) => l(top?.label ?? null, undoStack.length));
 }
 
-function setSnapshot(s: Snapshot) {
+/** @internal Shared with workbookOps.ts – push one undo step. */
+export function setSnapshot(s: Snapshot) {
   undoStack.push(s);
   if (undoStack.length > UNDO_LIMIT) undoStack.shift();
   notifyUndo();
@@ -133,8 +147,93 @@ async function applyUndo(ctx: Excel.RequestContext, snap: Snapshot) {
       // Keep the data, remove only the table object.
       ctx.workbook.tables.getItem(snap.tableName).convertToRange();
       break;
+    case "insertedRows":
+      ctx.workbook.worksheets.getItem(snap.sheetName).getRange(snap.rowAddress).delete(Excel.DeleteShiftDirection.up);
+      break;
+    case "deletedLines": {
+      const ws = ctx.workbook.worksheets.getItem(snap.sheetName);
+      const lines =
+        snap.lines === "rows"
+          ? ws.getRangeByIndexes(snap.start, 0, snap.count, 1).getEntireRow()
+          : ws.getRangeByIndexes(0, snap.start, 1, snap.count).getEntireColumn();
+      lines.insert(snap.lines === "rows" ? Excel.InsertShiftDirection.down : Excel.InsertShiftDirection.right);
+      if (snap.contentAddress && snap.formulas) ws.getRange(snap.contentAddress).formulas = snap.formulas;
+      break;
+    }
+    case "format": {
+      const r = ctx.workbook.worksheets.getItem(snap.sheetName).getRange(stripSheet(snap.address));
+      r.setCellProperties(snap.props);
+      r.numberFormat = snap.numberFormat;
+      break;
+    }
+    case "addedConditionalFormat":
+      ctx.workbook.worksheets.getItem(snap.sheetName).getRange(stripSheet(snap.address)).conditionalFormats.getItem(snap.id).delete();
+      break;
+    case "dataValidation": {
+      const dv = ctx.workbook.worksheets.getItem(snap.sheetName).getRange(stripSheet(snap.address)).dataValidation;
+      dv.clear();
+      if (snap.rule) dv.rule = snap.rule;
+      break;
+    }
+    case "addedName":
+      ctx.workbook.names.getItem(snap.name).delete();
+      break;
+    case "autoFilter":
+      ctx.workbook.worksheets.getItem(snap.sheetName).autoFilter.remove();
+      break;
+    case "freeze": {
+      const fp = ctx.workbook.worksheets.getItem(snap.sheetName).freezePanes;
+      fp.unfreeze();
+      if (snap.previous) fp.freezeAt(stripSheet(snap.previous));
+      break;
+    }
+    case "multi":
+      for (const step of [...snap.steps].reverse()) await applyUndo(ctx, step);
+      break;
   }
   await ctx.sync();
+}
+
+/* ---------------------------------------------------------------- format snapshots (for undo) */
+
+/** Largest range whose per-cell formatting is saved for undo (bigger ranges are formatted without undo). */
+export const FORMAT_UNDO_MAX_CELLS = 20_000;
+
+const FORMAT_LOAD: Excel.CellPropertiesLoadOptions = {
+  format: {
+    fill: { color: true, pattern: true },
+    font: { bold: true, italic: true, color: true, name: true, size: true, underline: true, strikethrough: true },
+    borders: { style: true, color: true, weight: true },
+    wrapText: true,
+    horizontalAlignment: true,
+    verticalAlignment: true,
+    indentLevel: true,
+  },
+};
+
+/**
+ * Turn loaded cell properties into settable ones. A cell without fill reports a white colour,
+ * so it is restored as "no fill" (pattern None) instead of painting it white.
+ */
+export function toSettableFormat(props: Excel.CellProperties[][]): Excel.SettableCellProperties[][] {
+  return props.map((row) =>
+    row.map((c) => {
+      const f = c.format ?? {};
+      const fill = f.fill && String(f.fill.pattern ?? "") === "None" ? { pattern: "None" as Excel.FillPattern } : f.fill;
+      return { format: { ...f, fill } };
+    })
+  );
+}
+
+/**
+ * @internal Queue a read of a range's formatting and return a function that builds the snapshot after
+ * the next sync. Returns null when the range is too large to snapshot. `r` must have rowCount/columnCount loaded.
+ */
+export function prepareFormatSnapshot(r: Excel.Range, sheetName: string, label: string): (() => Snapshot) | null {
+  if (r.rowCount * r.columnCount > FORMAT_UNDO_MAX_CELLS) return null;
+  const props = r.getCellProperties(FORMAT_LOAD);
+  r.load("address,numberFormat");
+  return () => ({ kind: "format", sheetName, address: r.address, props: toSettableFormat(props.value), numberFormat: r.numberFormat, label });
 }
 
 /** Undo the most recent Zee AI change (call repeatedly for multiple steps). */
@@ -328,7 +427,7 @@ export async function getSheetOverview(sampleRows = 5, maxCols = 40): Promise<st
 
 /* ---------------------------------------------------------------- writing */
 
-function hasContent(formulas: unknown[][]): boolean {
+export function hasContent(formulas: unknown[][]): boolean {
   return formulas.some((r) => r.some((v) => v !== "" && v !== null && v !== undefined));
 }
 
@@ -739,7 +838,7 @@ export const autofitSelection = autofitAllColumns;
 /* ================================================================ agent / workbook-level helpers */
 
 /** Resolve "Sheet1!A1:B3", "'My Sheet'!A1" or "A1:B3" (+ optional sheet name) to a Range. */
-function resolveRange(ctx: Excel.RequestContext, address: string, sheet?: string): Excel.Range {
+export function resolveRange(ctx: Excel.RequestContext, address: string, sheet?: string): Excel.Range {
   const addr = address.trim();
   const bang = addr.lastIndexOf("!");
   if (bang > 0) {
@@ -908,12 +1007,24 @@ export interface RangeFormat extends FormatOptions {
   wrap?: boolean;
 }
 
-/** Format any range (for the agent). Formatting is not tracked by undo. */
-export async function formatRangeAt(address: string, o: RangeFormat, sheet?: string): Promise<string> {
+/**
+ * Format any range. With `trackUndo` (agent mode) the previous per-cell formatting is saved so ↶ can
+ * restore it (ranges up to FORMAT_UNDO_MAX_CELLS cells). Report builders on fresh sheets skip it.
+ */
+export async function formatRangeAt(address: string, o: RangeFormat, sheet?: string, trackUndo = false): Promise<string> {
   return run(async (ctx) => {
     const r = resolveRange(ctx, address, sheet);
     r.load("address,rowCount,columnCount");
+    const ws = r.worksheet;
+    ws.load("name");
     await ctx.sync();
+    if (trackUndo) {
+      const build = prepareFormatSnapshot(r, ws.name, `format ${stripSheet(r.address)}`);
+      if (build) {
+        await ctx.sync();
+        setSnapshot(build());
+      }
+    }
     if (o.bold !== undefined) r.format.font.bold = o.bold;
     if (o.fillColor) r.format.fill.color = o.fillColor;
     if (o.fontColor) r.format.font.color = o.fontColor;
@@ -1051,6 +1162,27 @@ export async function readSelectionBlock(maxCells = 200_000): Promise<SelectionB
     r.load("values,text");
     await ctx.sync();
     return { sheetName: c.sheetName, address: b.address, rowIndex: b.rowIndex, columnIndex: b.columnIndex, values: r.values, text: r.text };
+  });
+}
+
+/** Like readSelectionBlock, for any address (clipped to the used range; used by agent tools). */
+export async function readBlockAt(address: string, sheet?: string, maxCells = 200_000): Promise<SelectionBlock> {
+  return run(async (ctx) => {
+    const target = resolveRange(ctx, address, sheet);
+    const ws = target.worksheet;
+    ws.load("name");
+    const used = ws.getUsedRangeOrNullObject(true);
+    used.load("address");
+    await ctx.sync();
+    if (used.isNullObject) throw new ExcelUserError(`${address} is empty.`);
+    const r = target.getIntersectionOrNullObject(used);
+    r.load("address,rowIndex,columnIndex,rowCount,columnCount");
+    await ctx.sync();
+    if (r.isNullObject) throw new ExcelUserError(`${address} is empty.`);
+    if (r.rowCount * r.columnCount > maxCells) throw new ExcelUserError(`Range is too large (max ${maxCells.toLocaleString()} cells).`);
+    r.load("values,text");
+    await ctx.sync();
+    return { sheetName: ws.name, address: r.address, rowIndex: r.rowIndex, columnIndex: r.columnIndex, values: r.values, text: r.text };
   });
 }
 

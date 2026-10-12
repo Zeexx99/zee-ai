@@ -311,6 +311,26 @@ export function SettingsDrawer({ open, settings, usage, onChange, onClose }: Pro
         <Divider />
 
         <section>
+          <h3>Gemini tools</h3>
+          <Switch
+            checked={settings.webSearch}
+            onChange={(_, d) => onChange({ webSearch: d.checked })}
+            label="Search the web (Google Search) – answers list their sources"
+          />
+          <Switch
+            checked={settings.codeExecution}
+            onChange={(_, d) => onChange({ codeExecution: d.checked })}
+            label="Run Python for calculations in chat (code execution)"
+          />
+          <p className="zee-muted">
+            Web search may add cost on your Google account (grounded requests are billed separately above the free allowance). In agent mode, web search is offered as a
+            tool; code execution applies to chat answers.
+          </p>
+        </section>
+
+        <Divider />
+
+        <section>
           <h3>Sheet context</h3>
           <Switch checked={settings.includeSelection} onChange={(_, d) => onChange({ includeSelection: d.checked })} label="Include the selected range in prompts by default" />
           <Switch
