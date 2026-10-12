@@ -128,3 +128,64 @@ export function cleanCell(v: unknown, o: CleanOptions): CleanResult {
   }
   return { value: s, changed: s !== v };
 }
+
+/* ---------------------------------------------------------------- empty rows / columns */
+
+const NULL_WORDS = new Set(["null", "none", "nil", "nan", "n/a", "#n/a", "na"]);
+
+/** True for a cell that carries no information: blank, spaces, 0, "0", "0.00" or a null word ("NULL", "N/A", "NaN"…). */
+export function isEmptyLike(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === "number") return v === 0 || Number.isNaN(v);
+  if (typeof v === "boolean") return false;
+  const s = String(v).replace(/[\s ]+/g, "");
+  if (s === "") return true;
+  if (NULL_WORDS.has(s.toLowerCase())) return true;
+  return /^[-+]?0*(\.0*)?$/.test(s) && /0/.test(s);
+}
+
+function isHeaderText(v: unknown): boolean {
+  return typeof v === "string" && !isEmptyLike(v) && Number.isNaN(Number(v.trim()));
+}
+
+/**
+ * Row indexes (0-based, ascending) whose every cell is empty-like.
+ * A row with even one real value is kept.
+ */
+export function findEmptyRows(values: unknown[][]): number[] {
+  const out: number[] = [];
+  values.forEach((row, i) => {
+    if (row.every(isEmptyLike)) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * Column indexes (0-based, ascending) whose every cell is empty-like.
+ * When the first row looks like a header row (has text), its header cell is ignored,
+ * so a column titled "Gas rate" that only holds zeros is still removed.
+ */
+export function findEmptyColumns(values: unknown[][]): number[] {
+  if (values.length === 0) return [];
+  const cols = values[0].length;
+  const hasHeader = values.length > 1 && values[0].some(isHeaderText);
+  const start = hasHeader ? 1 : 0;
+  const out: number[] = [];
+  for (let j = 0; j < cols; j++) {
+    let empty = true;
+    for (let i = start; i < values.length && empty; i++) if (!isEmptyLike(values[i][j])) empty = false;
+    if (empty) out.push(j);
+  }
+  return out;
+}
+
+/** Group ascending indexes into contiguous runs, returned last-first so they can be deleted safely. */
+export function runsDescending(indexes: number[]): { start: number; count: number }[] {
+  const runs: { start: number; count: number }[] = [];
+  for (const i of indexes) {
+    const last = runs[runs.length - 1];
+    if (last && last.start + last.count === i) last.count++;
+    else runs.push({ start: i, count: 1 });
+  }
+  return runs.reverse();
+}

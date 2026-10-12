@@ -9,7 +9,7 @@
  *    (Office.js changes are not on Excel's own undo stack).
  */
 import { a1, a1Range, columnLetter, quoteSheet, stripSheet, EXCEL_MAX_ROWS } from "../utils/a1";
-import { cleanCell, type CleanOptions } from "../utils/clean";
+import { cleanCell, findEmptyColumns, findEmptyRows, runsDescending, type CleanOptions } from "../utils/clean";
 import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
 import { chartTypeInfo, checkYCount, supportsLogScale, supportsSecondaryAxis } from "../utils/chartTypes";
@@ -70,6 +70,14 @@ async function run<T>(fn: (ctx: Excel.RequestContext) => Promise<T>): Promise<T>
   } catch (e) {
     throw toUserError(e);
   }
+}
+
+/**
+ * Auto-fit EVERY used column of the sheet that holds `r` (not just the cells written).
+ * Zee AI calls this after every write so all columns always fit their content. Queued; the caller syncs.
+ */
+function autofitAllOf(r: Excel.Range) {
+  r.worksheet.getUsedRange(true).getEntireColumn().format.autofitColumns();
 }
 
 /* ---------------------------------------------------------------- snapshot / undo (multi-step) */
@@ -359,7 +367,7 @@ export async function writeMatrixAtActiveCell(matrix: Cell[][], opts: WriteOptio
     });
     target.formulas = data;
     if (opts.header && data.length > 1) target.getRow(0).format.font.bold = true;
-    if (width > 1 || data.length > 1) target.format.autofitColumns();
+    autofitAllOf(target);
     target.select();
     await ctx.sync();
     return target.address;
@@ -499,6 +507,7 @@ export async function cleanSelection(options: CleanOptions): Promise<CleanSummar
       }
     }
     if (changed > 0) {
+      autofitAllOf(c.sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, 1, 1));
       await ctx.sync();
       if (keepUndo)
         setSnapshot({
@@ -511,6 +520,81 @@ export async function cleanSelection(options: CleanOptions): Promise<CleanSummar
         });
     }
     return { address: b.address, cellsChanged: changed, cellsScanned: total, undoAvailable: keepUndo && changed > 0 };
+  });
+}
+
+/* ---------------------------------------------------------------- remove empty rows / columns */
+
+export interface RemoveEmptySummary {
+  address: string;
+  removed: number;
+  scanned: number;
+  undoAvailable: boolean;
+}
+
+/**
+ * Delete rows (or columns) whose every cell is blank, 0 or a null word (NULL, N/A, NaN…).
+ * Works on the selection; when a single cell is selected it uses the whole sheet's data.
+ * Cells are shifted only inside that block, so data beside it is never moved.
+ */
+export async function removeEmptyLines(kind: "rows" | "columns"): Promise<RemoveEmptySummary> {
+  return run(async (ctx) => {
+    const sel = ctx.workbook.getSelectedRange();
+    sel.load("cellCount");
+    const sheet = sel.worksheet;
+    sheet.load("name");
+    const used = sheet.getUsedRangeOrNullObject(true);
+    used.load("address,rowIndex,columnIndex,rowCount,columnCount");
+    await ctx.sync();
+    if (used.isNullObject) throw new ExcelUserError("This sheet is empty.");
+
+    let b: Block;
+    if (sel.cellCount <= 1) {
+      b = blockOf(used);
+    } else {
+      const c = await loadClippedSelection(ctx);
+      if (c.isEmpty) throw new ExcelUserError("The selected cells are empty.");
+      b = c.block;
+    }
+    const total = b.rowCount * b.columnCount;
+    if (total > CLEAN_MAX_CELLS) throw new ExcelUserError(`Select fewer than ${CLEAN_MAX_CELLS.toLocaleString()} cells at once.`);
+
+    const r = sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, b.rowCount, b.columnCount);
+    r.load("values,formulas,numberFormat");
+    await ctx.sync();
+
+    const before = { formulas: r.formulas, numberFormat: r.numberFormat };
+    const lines = kind === "rows" ? b.rowCount : b.columnCount;
+    const hits = kind === "rows" ? findEmptyRows(r.values) : findEmptyColumns(r.values);
+    if (hits.length === 0) return { address: b.address, removed: 0, scanned: lines, undoAvailable: false };
+
+    for (const seg of runsDescending(hits)) {
+      const part =
+        kind === "rows"
+          ? sheet.getRangeByIndexes(b.rowIndex + seg.start, b.columnIndex, seg.count, b.columnCount)
+          : sheet.getRangeByIndexes(b.rowIndex, b.columnIndex + seg.start, b.rowCount, seg.count);
+      part.delete(kind === "rows" ? Excel.DeleteShiftDirection.up : Excel.DeleteShiftDirection.left);
+    }
+    await ctx.sync();
+    const left = sheet.getUsedRangeOrNullObject(true);
+    left.load("address");
+    await ctx.sync();
+    if (!left.isNullObject) {
+      left.getEntireColumn().format.autofitColumns();
+      await ctx.sync();
+    }
+
+    const keepUndo = total <= UNDO_MAX_CELLS;
+    if (keepUndo)
+      setSnapshot({
+        kind: "cells",
+        sheetName: sheet.name,
+        address: b.address,
+        formulas: before.formulas,
+        numberFormat: before.numberFormat,
+        label: `remove empty ${kind} ${stripSheet(b.address)}`,
+      });
+    return { address: b.address, removed: hits.length, scanned: lines, undoAvailable: keepUndo };
   });
 }
 
@@ -559,7 +643,7 @@ export async function insertResultColumn(src: ColumnSource, results: string[], l
     const out = sheet.getRangeByIndexes(src.rowIndex, newCol, results.length, 1);
     out.numberFormat = results.map(() => ["@"]); // keep as text: "+1 555…" must not become a formula
     out.values = results.map((v) => [v]);
-    sheet.getRangeByIndexes(0, newCol, 1, 1).getEntireColumn().format.autofitColumns();
+    autofitAllOf(sheet.getRangeByIndexes(0, newCol, 1, 1));
     await ctx.sync();
 
     const letter = columnLetter(newCol);
@@ -601,7 +685,7 @@ export async function formatSelection(o: FormatOptions): Promise<string> {
         r.format.borders.getItem(i).style = Excel.BorderLineStyle.continuous;
       });
     }
-    if (o.autofit) r.format.autofitColumns();
+    if (o.autofit) autofitAllOf(r);
     await ctx.sync();
     return r.address;
   });
@@ -614,7 +698,7 @@ export async function formatSelectionAsTable(): Promise<string> {
     if (c.isEmpty) throw new ExcelUserError("Select the data you want to turn into a table.");
     const table = c.sheet.tables.add(c.block.address, true);
     table.style = "TableStyleMedium2";
-    table.getRange().format.autofitColumns();
+    autofitAllOf(table.getRange());
     table.load("name");
     await ctx.sync();
     setSnapshot({ kind: "addedTable", tableName: table.name, label: `table ${table.name}` });
@@ -622,9 +706,23 @@ export async function formatSelectionAsTable(): Promise<string> {
   });
 }
 
-export async function autofitSelection(): Promise<string> {
-  return formatSelection({ autofit: true });
+/** Auto-fit all columns of the active sheet, whatever is selected. */
+export async function autofitAllColumns(): Promise<string> {
+  return run(async (ctx) => {
+    const sheet = ctx.workbook.worksheets.getActiveWorksheet();
+    sheet.load("name");
+    const used = sheet.getUsedRangeOrNullObject(true);
+    used.load("address");
+    await ctx.sync();
+    if (used.isNullObject) throw new ExcelUserError("This sheet is empty – nothing to auto-fit.");
+    used.getEntireColumn().format.autofitColumns();
+    await ctx.sync();
+    return `${sheet.name} – all columns`;
+  });
 }
+
+/** Kept for older callers: now fits every column on the sheet. */
+export const autofitSelection = autofitAllColumns;
 
 /* ================================================================ agent / workbook-level helpers */
 
@@ -821,7 +919,7 @@ export async function formatRangeAt(address: string, o: RangeFormat, sheet?: str
         r.format.borders.getItem(i).style = Excel.BorderLineStyle.continuous;
       });
     }
-    if (o.autofit) r.format.autofitColumns();
+    if (o.autofit) autofitAllOf(r);
     await ctx.sync();
     return r.address;
   });
@@ -914,7 +1012,7 @@ export async function writeBlock(sheetName: string, topLeft: string, rows: Cell[
       h.format.font.bold = true;
       h.format.fill.color = "#EDEBFB";
     }
-    target.format.autofitColumns();
+    autofitAllOf(target);
     target.load("address");
     await ctx.sync();
     return target.address;
@@ -966,7 +1064,7 @@ export async function insertConvertedColumns(conv: UnitConversion, firstRowIsHea
     const target = ws.getRangeByIndexes(blk.rowIndex, firstNew, out.length, cols);
     target.values = out;
     if (firstRowIsHeader) target.getRow(0).format.font.bold = true;
-    target.format.autofitColumns();
+    autofitAllOf(target);
     await ctx.sync();
     const colAddr = `${columnLetter(firstNew)}:${columnLetter(firstNew + cols - 1)}`;
     setSnapshot({ kind: "insertedColumn", sheetName: blk.sheetName, columnAddress: colAddr, label: `${conv.label} columns ${colAddr}` });
@@ -1145,7 +1243,7 @@ export async function plotColumns(req: PlotRequest): Promise<{ title: string; he
           hs.getRangeByIndexes(1 + start, 0, n, blockCols.length).formulas = formulas;
           await ctx.sync();
         }
-        hs.getRangeByIndexes(0, 0, rows + 1, blockCols.length).format.autofitColumns();
+        autofitAllOf(hs.getRangeByIndexes(0, 0, rows + 1, blockCols.length));
         block = hs.getRangeByIndexes(0, 0, rows + 1, blockCols.length);
       }
       chart = ws.charts.add(info.id as Excel.ChartType, block, Excel.ChartSeriesBy.columns);
@@ -1364,7 +1462,7 @@ export async function writeFormulaColumn(
     target.numberFormat = cells.map(() => ["General"]);
     target.formulas = cells.map((f) => [f]);
     if (opts.header) target.getCell(0, 0).format.font.bold = true;
-    target.format.autofitColumns();
+    autofitAllOf(target);
     target.getCell(opts.header && cells.length > 1 ? 1 : 0, 0).select();
     await ctx.sync();
     return target.address;

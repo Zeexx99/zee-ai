@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDateText, parseNumberText, toExcelSerial, toProperCase } from "../utils/clean";
+import { findEmptyColumns, findEmptyRows, isEmptyLike, parseDateText, parseNumberText, runsDescending, toExcelSerial, toProperCase } from "../utils/clean";
 
 describe("dates", () => {
   it("Excel serial", () => {
@@ -28,4 +28,35 @@ describe("numbers", () => {
 
 describe("text", () => {
   it("proper case", () => expect(toProperCase("WELL a-12 north")).toBe("Well A-12 North"));
+});
+
+describe("empty rows / columns", () => {
+  it("empty-like cells", () => {
+    for (const v of ["", "  ", 0, "0", "0.00", "NULL", "null", "N/A", "NaN", null]) expect(isEmptyLike(v)).toBe(true);
+    for (const v of [1, "x", "0.5", "10", false, "-"]) expect(isEmptyLike(v)).toBe(false);
+  });
+  it("finds rows that are fully blank / zero / null", () => {
+    const v = [
+      ["Well", "Oil", "Gas"],
+      ["", 0, "NULL"],
+      ["A-1", 120, 0],
+      [0, 0, 0],
+    ];
+    expect(findEmptyRows(v)).toEqual([1, 3]);
+  });
+  it("finds columns that are fully blank / zero / null, ignoring a header row", () => {
+    const v = [
+      ["Well", "Water", "Gas", ""],
+      ["A-1", 0, 5, ""],
+      ["A-2", "null", 0, 0],
+    ];
+    expect(findEmptyColumns(v)).toEqual([1, 3]);
+  });
+  it("groups runs last-first", () => {
+    expect(runsDescending([1, 2, 5, 7, 8, 9])).toEqual([
+      { start: 7, count: 3 },
+      { start: 5, count: 1 },
+      { start: 1, count: 2 },
+    ]);
+  });
 });

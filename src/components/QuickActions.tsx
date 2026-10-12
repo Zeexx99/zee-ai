@@ -10,6 +10,8 @@ export interface QuickActionHandlers {
   onExtract: () => void;
   onFormatTable: () => void;
   onAutofit: () => void;
+  onRemoveEmptyRows: () => void;
+  onRemoveEmptyColumns: () => void;
   onExplainFormula: () => void;
   onGenerateFormula: () => void;
   onAnalyze: () => void;
@@ -67,8 +69,12 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuItem onClick={p.onClean}>Clean data…</MenuItem>
             <MenuItem onClick={p.onExtract}>Split / Extract…</MenuItem>
             <MenuDivider />
+            <MenuGroupHeader>Blank, 0 or NULL everywhere</MenuGroupHeader>
+            <MenuItem onClick={p.onRemoveEmptyColumns}>Remove empty columns</MenuItem>
+            <MenuItem onClick={p.onRemoveEmptyRows}>Remove empty rows</MenuItem>
+            <MenuDivider />
             <MenuItem onClick={p.onFormatTable}>Format as table</MenuItem>
-            <MenuItem onClick={p.onAutofit}>Auto-fit columns</MenuItem>
+            <MenuItem onClick={p.onAutofit}>Auto-fit all columns</MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>

@@ -55,7 +55,8 @@ import {
   AGGREGATE_LABELS,
   OverwriteRequiredError,
   cleanSelection,
-  autofitSelection,
+  autofitAllColumns,
+  removeEmptyLines,
   createChart,
   getWorkbookOverview,
   insertConvertedColumns,
@@ -370,6 +371,22 @@ export default function App() {
         r.cellsChanged ? "success" : "info",
         r.cellsChanged ? `Cleaned ${r.cellsChanged.toLocaleString()} cells` : "Already clean",
         `${stripSheet(r.address)} · ${r.cellsScanned.toLocaleString()} cells scanned${r.cellsChanged && !r.undoAvailable ? " · undo not available for very large ranges" : ""}`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const onRemoveEmpty = (kind: "rows" | "columns") => async () => {
+    setJob({ text: `Removing empty ${kind}…` });
+    try {
+      const r = await removeEmptyLines(kind);
+      toast(
+        r.removed ? "success" : "info",
+        r.removed ? `Removed ${r.removed.toLocaleString()} empty ${kind}` : `No empty ${kind} found`,
+        `${stripSheet(r.address)} · ${r.scanned.toLocaleString()} ${kind} checked${r.removed && !r.undoAvailable ? " · undo not available for very large ranges" : ""}`
       );
     } catch (e) {
       toastError(e);
@@ -789,7 +806,9 @@ export default function App() {
           onClean={() => setCleanOpen(true)}
           onExtract={() => setExtractOpen(true)}
           onFormatTable={simple(formatSelectionAsTable, "Formatted as table")}
-          onAutofit={simple(autofitSelection, "Columns auto-fitted")}
+          onAutofit={simple(autofitAllColumns, "All columns auto-fitted")}
+          onRemoveEmptyRows={onRemoveEmpty("rows")}
+          onRemoveEmptyColumns={onRemoveEmpty("columns")}
           onExplainFormula={onExplainFormula}
           onGenerateFormula={() => setGenOpen(true)}
           onAnalyze={onAnalyze}
