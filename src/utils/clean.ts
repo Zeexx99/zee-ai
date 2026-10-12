@@ -160,6 +160,22 @@ export function findEmptyRows(values: unknown[][]): number[] {
   return out;
 }
 
+/** True when the first row looks like a header row (has at least one text label). */
+export function looksLikeHeaderRow(row: unknown[]): boolean {
+  return row.some(isHeaderText);
+}
+
+/**
+ * Mark columns that hold at least one real value. `filled[j]` becomes true for those columns.
+ * Call it once per chunk of rows; pass skipFirstRow for the chunk that starts with the header row.
+ */
+export function markFilledColumns(values: unknown[][], filled: boolean[], skipFirstRow = false): void {
+  for (let i = skipFirstRow ? 1 : 0; i < values.length; i++) {
+    const row = values[i];
+    for (let j = 0; j < row.length; j++) if (!filled[j] && !isEmptyLike(row[j])) filled[j] = true;
+  }
+}
+
 /**
  * Column indexes (0-based, ascending) whose every cell is empty-like.
  * When the first row looks like a header row (has text), its header cell is ignored,
@@ -167,15 +183,12 @@ export function findEmptyRows(values: unknown[][]): number[] {
  */
 export function findEmptyColumns(values: unknown[][]): number[] {
   if (values.length === 0) return [];
-  const cols = values[0].length;
-  const hasHeader = values.length > 1 && values[0].some(isHeaderText);
-  const start = hasHeader ? 1 : 0;
+  const filled = Array<boolean>(values[0].length).fill(false);
+  markFilledColumns(values, filled, values.length > 1 && looksLikeHeaderRow(values[0]));
   const out: number[] = [];
-  for (let j = 0; j < cols; j++) {
-    let empty = true;
-    for (let i = start; i < values.length && empty; i++) if (!isEmptyLike(values[i][j])) empty = false;
-    if (empty) out.push(j);
-  }
+  filled.forEach((f, j) => {
+    if (!f) out.push(j);
+  });
   return out;
 }
 

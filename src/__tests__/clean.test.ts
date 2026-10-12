@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findEmptyColumns, findEmptyRows, isEmptyLike, parseDateText, parseNumberText, runsDescending, toExcelSerial, toProperCase } from "../utils/clean";
+import { findEmptyColumns, findEmptyRows, isEmptyLike, looksLikeHeaderRow, markFilledColumns, parseDateText, parseNumberText, runsDescending, toExcelSerial, toProperCase } from "../utils/clean";
 
 describe("dates", () => {
   it("Excel serial", () => {
@@ -58,5 +58,19 @@ describe("empty rows / columns", () => {
       { start: 5, count: 1 },
       { start: 1, count: 2 },
     ]);
+  });
+});
+
+describe("chunked column scan", () => {
+  it("gives the same answer when rows arrive in chunks", () => {
+    const v = [
+      ["Well", "Water", "Gas", ""],
+      ["A-1", 0, 0, ""],
+      ["A-2", "null", 7, 0],
+    ];
+    const filled = [false, false, false, false];
+    markFilledColumns(v.slice(0, 2), filled, looksLikeHeaderRow(v[0]));
+    markFilledColumns(v.slice(2), filled);
+    expect(filled).toEqual([true, false, true, false]);
   });
 });

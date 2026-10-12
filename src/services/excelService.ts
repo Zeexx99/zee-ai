@@ -9,7 +9,7 @@
  *    (Office.js changes are not on Excel's own undo stack).
  */
 import { a1, a1Range, columnLetter, quoteSheet, stripSheet, EXCEL_MAX_ROWS } from "../utils/a1";
-import { cleanCell, findEmptyColumns, findEmptyRows, runsDescending, type CleanOptions } from "../utils/clean";
+import { cleanCell, findEmptyRows, looksLikeHeaderRow, markFilledColumns, runsDescending, type CleanOptions } from "../utils/clean";
 import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
 import { chartTypeInfo, checkYCount, supportsLogScale, supportsSecondaryAxis } from "../utils/chartTypes";
@@ -464,6 +464,8 @@ export interface CleanSummary {
 
 const CLEAN_MAX_CELLS = 200_000;
 const UNDO_MAX_CELLS = 50_000;
+/** Remove empty rows/columns scans in chunks, so it can handle much bigger sheets than Clean. */
+const REMOVE_EMPTY_MAX_CELLS = 10_000_000;
 
 export async function cleanSelection(options: CleanOptions): Promise<CleanSummary> {
   return run(async (ctx) => {
@@ -546,25 +548,47 @@ export async function removeEmptyLines(kind: "rows" | "columns"): Promise<Remove
     if (used.isNullObject) throw new ExcelUserError("This sheet is empty.");
     const b: Block = blockOf(used);
     const total = b.rowCount * b.columnCount;
-    if (total > CLEAN_MAX_CELLS) throw new ExcelUserError(`This sheet has more than ${CLEAN_MAX_CELLS.toLocaleString()} cells – too large to scan at once.`);
+    if (total > REMOVE_EMPTY_MAX_CELLS)
+      throw new ExcelUserError(`This sheet has ${total.toLocaleString()} cells – the limit is ${REMOVE_EMPTY_MAX_CELLS.toLocaleString()}.`);
 
-    const r = sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, b.rowCount, b.columnCount);
-    r.load("values,formulas,numberFormat");
-    await ctx.sync();
+    // Read the sheet in row chunks (~20,000 cells each) so big sheets stay under Office's payload limit.
+    const keepUndo = total <= UNDO_MAX_CELLS;
+    const undoFormulas: unknown[][] = [];
+    const undoFormats: unknown[][] = [];
+    const emptyRows: number[] = [];
+    const filled = Array<boolean>(b.columnCount).fill(false);
+    const chunkRows = Math.max(1, Math.floor(20_000 / b.columnCount));
+    for (let start = 0; start < b.rowCount; start += chunkRows) {
+      const rows = Math.min(chunkRows, b.rowCount - start);
+      const r = sheet.getRangeByIndexes(b.rowIndex + start, b.columnIndex, rows, b.columnCount);
+      r.load(keepUndo ? "values,formulas,numberFormat" : "values");
+      await ctx.sync();
+      if (keepUndo) {
+        undoFormulas.push(...r.formulas);
+        undoFormats.push(...r.numberFormat);
+      }
+      if (kind === "rows") {
+        for (const i of findEmptyRows(r.values)) emptyRows.push(start + i);
+      } else {
+        const skipHeader = start === 0 && b.rowCount > 1 && looksLikeHeaderRow(r.values[0]);
+        markFilledColumns(r.values, filled, skipHeader);
+      }
+    }
 
-    const before = { formulas: r.formulas, numberFormat: r.numberFormat };
     const lines = kind === "rows" ? b.rowCount : b.columnCount;
-    const hits = kind === "rows" ? findEmptyRows(r.values) : findEmptyColumns(r.values);
+    const hits = kind === "rows" ? emptyRows : filled.flatMap((f, j) => (f ? [] : [j]));
     if (hits.length === 0) return { address: b.address, removed: 0, scanned: lines, undoAvailable: false };
 
+    // Delete bottom-up / right-to-left so earlier indexes stay valid; sync in batches.
+    // The used range holds all the sheet's data, so whole rows/columns can go (much faster on big sheets).
+    let queued = 0;
     for (const seg of runsDescending(hits)) {
-      const part =
-        kind === "rows"
-          ? sheet.getRangeByIndexes(b.rowIndex + seg.start, b.columnIndex, seg.count, b.columnCount)
-          : sheet.getRangeByIndexes(b.rowIndex, b.columnIndex + seg.start, b.rowCount, seg.count);
-      part.delete(kind === "rows" ? Excel.DeleteShiftDirection.up : Excel.DeleteShiftDirection.left);
+      if (kind === "rows") sheet.getRangeByIndexes(b.rowIndex + seg.start, 0, seg.count, 1).getEntireRow().delete(Excel.DeleteShiftDirection.up);
+      else sheet.getRangeByIndexes(0, b.columnIndex + seg.start, 1, seg.count).getEntireColumn().delete(Excel.DeleteShiftDirection.left);
+      if (++queued % 500 === 0) await ctx.sync();
     }
     await ctx.sync();
+
     const left = sheet.getUsedRangeOrNullObject(true);
     left.load("address");
     await ctx.sync();
@@ -573,14 +597,13 @@ export async function removeEmptyLines(kind: "rows" | "columns"): Promise<Remove
       await ctx.sync();
     }
 
-    const keepUndo = total <= UNDO_MAX_CELLS;
     if (keepUndo)
       setSnapshot({
         kind: "cells",
         sheetName: sheet.name,
         address: b.address,
-        formulas: before.formulas,
-        numberFormat: before.numberFormat,
+        formulas: undoFormulas,
+        numberFormat: undoFormats,
         label: `remove empty ${kind} ${stripSheet(b.address)}`,
       });
     return { address: b.address, removed: hits.length, scanned: lines, undoAvailable: keepUndo };
