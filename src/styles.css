@@ -931,3 +931,18 @@ body.zee-light {
   font-size: 12px;
   max-width: 100%;
 }
+
+/* Tool dialogs (daily report, ESP failure log, validation rules) */
+.zee-dialog {
+  max-width: 560px;
+}
+.zee-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--zee-border);
+}
+.zee-rule-num {
+  width: 110px;
+}

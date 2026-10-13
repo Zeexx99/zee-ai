@@ -36,6 +36,8 @@ import {
   type CfArgs,
 } from "./workbookOps";
 import { runProductionQc } from "./petroActions";
+import { readHeaderedAt, runEspFailureAnalysis, runFormulaAudit } from "./toolActions";
+import { guessEspLogMapping, type EspLogMapping } from "../utils/espFailures";
 import { fitArps, prepareDca, arpsTimeToRate, arpsCum } from "../utils/petro";
 import { convertUnit, normalizeUnit, UNIT_HELP } from "../utils/units";
 import { analyzeEsp, parseCurve } from "../utils/espAnalysis";
@@ -50,7 +52,8 @@ HOW TO WORK
 - In set_cells every value is a string; strings starting with "=" are formulas. Write whole blocks in one call, not cell by cell.
 - Don't overwrite existing data unless the user asked for it. Put new results in empty cells/columns (e.g. next to the data) or on a new sheet.
 - Use the dedicated tools instead of workarounds: insert_rows_columns / delete_rows_columns, sort_range, filter_range, conditional_format, data_validation, create_pivot_table, freeze_panes, find_cells / replace_text, copy_range, clear_range, add_named_range.
-- Petroleum: fit_decline_curve for Arps decline; production_qc for data-quality checks (writes a report sheet); esp_analysis for ESP performance (TDH, affinity laws, operating range, flags); convert_units for unit columns.
+- Petroleum: fit_decline_curve for Arps decline; production_qc for data-quality checks (writes a report sheet); esp_analysis for ESP performance (TDH, affinity laws, operating range, flags); esp_failure_analysis for run life / MTBF / failure causes from an ESP failure log; convert_units for unit columns.
+- formula_audit checks a sheet's formulas (errors, #REF!, inconsistent formulas, hard-coded numbers) and writes a report sheet.
 - For charts, pass a contiguous data range whose first row holds the series names.
 - If the user attached images or PDFs (pump curves, well-test reports, scanned tables), read them carefully. When digitising a curve, sample enough points to follow its shape and say the values are read from the image (approximate).
 - Keep changes minimal and focused. The user approves each batch of changes, and can undo them.
@@ -294,6 +297,18 @@ const BASE_TOOLS: FunctionDeclaration[] = [
     },
   },
   {
+    name: "esp_failure_analysis",
+    description:
+      "Analyze an ESP failure / run-life log (one row per ESP run: well, install date, pull/fail date, optional status, model, failed component, cause). Computes run life, MTBF, failures by cause/component/model/well and a monthly trend; writes an 'ESP Failure Analysis' sheet with charts and returns the key numbers.",
+    parameters: { type: "OBJECT", properties: { address: { type: "STRING", description: "The log including its header row." }, sheet: SHEET }, required: ["address"] },
+  },
+  {
+    name: "formula_audit",
+    description:
+      "Audit every formula on a sheet: error values (#DIV/0!, #N/A…), broken #REF! references, formulas that differ from the rest of their column, typed values in formula columns and hard-coded numbers. Writes a 'Formula Audit' sheet (clickable cell links) and returns counts plus the first findings.",
+    parameters: { type: "OBJECT", properties: { sheet: { type: "STRING", description: "Sheet to audit; defaults to the active sheet." } } },
+  },
+  {
     name: "production_qc",
     description:
       "Quality-check production data (missing, negative, zero, outlier and stuck-gauge values; date gaps and duplicates when the first column is dates). Writes a 'QC Report' sheet and returns the issue count.",
@@ -377,6 +392,8 @@ export const WRITE_TOOLS = new Set([
   "create_pivot_table",
   "production_qc",
   "convert_units",
+  "esp_failure_analysis",
+  "formula_audit",
 ]);
 
 export interface ToolCall {
@@ -450,6 +467,10 @@ export function describeCall(c: ToolCall): string {
       return `Fit decline curve (time ${a.time_address}, rate ${a.rate_address})`;
     case "production_qc":
       return `Production QC of ${where(a.address, a.sheet)} → new "QC Report" sheet`;
+    case "esp_failure_analysis":
+      return `ESP failure analysis of ${where(a.address, a.sheet)} → new "ESP Failure Analysis" sheet`;
+    case "formula_audit":
+      return `Formula audit of ${a.sheet ? `sheet "${a.sheet}"` : "the active sheet"} → new "Formula Audit" sheet`;
     case "convert_units":
       return `Convert ${where(a.source, a.sheet)} from ${a.from_unit} to ${a.to_unit}${a.destination ? ` → ${a.destination}` : ""}`;
     case "esp_analysis":
@@ -612,6 +633,29 @@ export async function executeTool(c: ToolCall, ctx?: ToolContext): Promise<Recor
       case "production_qc": {
         const r = await runProductionQc({ address: String(a.address), sheet: s(a.sheet) });
         return { ok: true, report_sheet: r.sheet, issues: r.issues, columns_checked: r.columns };
+      }
+      case "esp_failure_analysis": {
+        const sel = await readHeaderedAt(String(a.address), s(a.sheet), "failure log");
+        const g = guessEspLogMapping(sel.headers);
+        if (g.well === undefined || g.install === undefined || g.end === undefined)
+          return { error: `Couldn't identify the well, install-date and pull/fail-date columns from the headers (${sel.headers.join(", ")}). Ask the user to use Petroleum → ESP failure log → Analyze, which lets them pick the columns.` };
+        const r = await runEspFailureAnalysis(sel, g as EspLogMapping);
+        const rep = r.report;
+        return {
+          ok: true,
+          report_sheet: r.sheet,
+          installs: rep.installs,
+          failures: rep.failures,
+          running: rep.running,
+          mtbf_days: rep.mtbf,
+          avg_failed_run_life_days: rep.avgFailedRunLife,
+          top_causes: rep.byCause.slice(0, 5).map((c) => `${c.name}: ${c.failures}`),
+          repeat_failure_wells: rep.repeatWells,
+        };
+      }
+      case "formula_audit": {
+        const r = await runFormulaAudit({}, s(a.sheet));
+        return { ok: true, report_sheet: r.sheet, formulas: r.formulaCells, counts: r.counts, first_findings: r.issues.slice(0, 15).map((i) => `${i.address}: ${i.detail}`) };
       }
       case "convert_units": {
         const blk = await readBlockAt(String(a.source), s(a.sheet), 200_000);

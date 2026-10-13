@@ -13,7 +13,10 @@ export function errorHelp(message: string, kind?: string): ErrorHelp {
   const m = message.toLowerCase();
   if (kind === "aborted" || /^stopped\.?$/.test(m)) return { hint: null, retryable: true };
   if (kind === "network" || /network|failed to fetch|internet|firewall|timed? ?out/.test(m))
-    return { hint: "Check your internet connection or VPN, then press Retry. A company firewall may block generativelanguage.googleapis.com – the team proxy avoids that.", retryable: true };
+    return {
+      hint: "Check your internet connection or VPN. If the connection dropped, this is sent again automatically when it's back – or press Retry. A company firewall may block generativelanguage.googleapis.com – the team proxy avoids that.",
+      retryable: true,
+    };
   if (kind === "quota" || /\b429\b|quota|rate limit|resource.?exhausted|too many requests/.test(m))
     return { hint: "You've hit Gemini's rate limit or quota. Wait a minute and Retry, or pick a lighter model (Flash-Lite) in Settings.", retryable: true };
   if (kind === "auth" || /api key|authenticat|sign in|unauthori[sz]ed|\b401\b|\b403\b|permission/.test(m))

@@ -62,7 +62,26 @@ import {
 } from "./components/Dialogs";
 import { InsertActionsContext, copyText, type InsertActions } from "./components/insertActions";
 import { UpdateBanners, useUpdates } from "./qol/UpdateBanners";
+import { DailyReportDialog, EspLogDialog, RulesDialog, type DailyReportTarget } from "./components/ToolDialogs";
+import {
+  ESP_FAILURE_PROMPT,
+  applyColumnRules,
+  createEspFailureLog,
+  datesIn,
+  profileSelectionForRules,
+  readHeaderedSelection,
+  runDailyReport,
+  runEspFailureAnalysis,
+  runFormulaAudit,
+  type HeaderedSelection,
+  type RulesTarget,
+} from "./services/toolActions";
+import { RULES_SCHEMA, RULES_SYSTEM_PROMPT, profilesForPrompt, sanitizeRules, type ColumnRule } from "./utils/columnRules";
+import { AUDIT_LABELS } from "./utils/formulaAudit";
+import type { DailyMapping } from "./utils/dailyReport";
+import type { EspLogMapping } from "./utils/espFailures";
 import { recordUsage, usageForDay } from "./qol/usageLog";
+import { useOfflineQueue } from "./qol/offline";
 import { buildDiagnostics } from "./qol/diagnostics";
 import { timeAgo } from "./utils/undoHistory";
 import { describeLines } from "./utils/clean";
@@ -372,6 +391,8 @@ export default function App() {
     },
     [editPrompt, messages, retry, toast]
   );
+
+  const offline = useOfflineQueue(messages, busy, retryAnswer);
 
   const copyDiagnostics = useCallback(
     async (m: ChatMessage) => {
@@ -797,6 +818,161 @@ export default function App() {
   };
 
 
+  /* ------------------------------------------------------------ daily report, ESP failure log, audit, validation */
+  const toolSel = useRef<HeaderedSelection | null>(null);
+  const [dailyTarget, setDailyTarget] = useState<DailyReportTarget | null>(null);
+  const openDailyReport = async () => {
+    try {
+      const sel = await readHeaderedSelection("production data (Date, Well, Oil… columns)");
+      toolSel.current = sel;
+      setDailyTarget({ headers: sel.headers, datesFor: (col) => datesIn(sel, col) });
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const onDailyReport = async (m: DailyMapping, reportDate?: number) => {
+    setDailyTarget(null);
+    const sel = toolSel.current;
+    if (!sel) return;
+    setJob({ text: "Building the daily report…" });
+    try {
+      const r = await runDailyReport(sel, m, reportDate);
+      const copied = await copyText(r.packageText);
+      toast(
+        "success",
+        `Daily report ${r.pkg.dateLabel} – ${r.summary.wells.length} wells`,
+        `Sheet "${r.sheet}"${r.hasChart ? " with chart" : ""}. Now in Word: Zee AI → Templates → Daily report from Excel${copied ? " (also copied to the clipboard, in case Word asks you to paste it)" : ""}.`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const onEspLogTemplate = async () => {
+    try {
+      const sheet = await createEspFailureLog();
+      toast("success", "ESP failure log created", `Sheet "${sheet}": one row per ESP run. Run life fills in by itself; Status, Component and Cause have drop-down lists.`);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const [espLogHeaders, setEspLogHeaders] = useState<string[] | null>(null);
+  const openEspLog = async () => {
+    try {
+      const sel = await readHeaderedSelection("ESP failure log");
+      toolSel.current = sel;
+      setEspLogHeaders(sel.headers);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const onEspLog = async (m: EspLogMapping) => {
+    setEspLogHeaders(null);
+    const sel = toolSel.current;
+    if (!sel) return;
+    setJob({ text: "Analysing the ESP failure log…" });
+    try {
+      const r = await runEspFailureAnalysis(sel, m);
+      const rep = r.report;
+      toast("success", `MTBF ${rep.mtbf ?? "–"} days · ${rep.failures} failures in ${rep.installs} runs`, `Report on sheet "${r.sheet}".${rep.skipped ? ` ${rep.skipped} rows skipped (no well or install date).` : ""}`);
+      setJob(null);
+      if (rep.failures && isConfigured(settingsRef.current)) {
+        await send({ display: "ESP failure analysis – summary & recommendations", prompt: `${ESP_FAILURE_PROMPT}\n\n${r.digest}`, contextLabel: `${sel.block.address} → ${r.sheet}`, forceChat: true });
+      }
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const onFormulaAudit = async () => {
+    const abort = new AbortController();
+    setJob({ text: "Auditing formulas…", abort, progress: 0 });
+    try {
+      const r = await runFormulaAudit({ onProgress: progressFor(abort), signal: abort.signal });
+      setJob(null);
+      const parts = Object.entries(r.counts).map(([k, n]) => `${n} ${AUDIT_LABELS[k as keyof typeof AUDIT_LABELS].toLowerCase()}`);
+      toast(r.issues.length ? "warning" : "success", r.issues.length ? `${r.issues.length} findings in ${r.formulaCells.toLocaleString()} formulas` : `All ${r.formulaCells.toLocaleString()} formulas look fine`, `${parts.join(" · ") || "No problems"} → sheet "${r.sheet}"`);
+      const serious = r.issues.filter((i) => i.severity !== "low");
+      if (serious.length && isConfigured(settingsRef.current)) {
+        const ok = await askConfirm({
+          title: "Ask Zee AI how to fix them?",
+          message: `${serious.length} error / inconsistency finding${serious.length === 1 ? "" : "s"} on "${r.source}". Zee AI can explain the likely cause and the corrected formula for each (up to 40).`,
+          confirmLabel: "Explain fixes",
+        });
+        if (ok) {
+          const list = serious
+            .slice(0, 40)
+            .map((i) => `- ${i.address}: ${AUDIT_LABELS[i.kind]} – ${i.detail} Formula: ${i.formula || "(value)"}`)
+            .join("\n");
+          await send({
+            display: `Formula audit of "${r.source}" – how to fix`,
+            prompt: `These problems were found by a formula audit of sheet "${r.source}". For each, explain the likely cause in one line and give the corrected formula in an \`\`\`excel block when possible. Group similar ones.\n\n${list}`,
+            contextLabel: r.source,
+            forceChat: true,
+          });
+        }
+      }
+    } catch (e) {
+      if (abort.signal.aborted) toast("info", "Cancelled", "Nothing was changed.");
+      else toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const rulesTarget = useRef<RulesTarget | null>(null);
+  const [rules, setRules] = useState<ColumnRule[] | null>(null);
+  const onSuggestRules = async () => {
+    if (!ensureConfigured()) return;
+    const abort = new AbortController();
+    setJob({ text: "Profiling the columns…", abort });
+    try {
+      const t = await profileSelectionForRules();
+      rulesTarget.current = t;
+      setJob({ text: `Gemini is suggesting rules for ${t.profiles.length} columns…`, abort });
+      const { data, usage: u } = await generateJson<{ rules: ColumnRule[] }>({
+        settings: settingsRef.current,
+        systemInstruction: RULES_SYSTEM_PROMPT,
+        prompt: `Columns of ${t.sel.block.address} (${t.sel.rows.length} data rows):\n${profilesForPrompt(t.profiles)}`,
+        schema: RULES_SCHEMA,
+        signal: abort.signal,
+      });
+      if (u) addUsage(u);
+      setRules(sanitizeRules(data?.rules, t.profiles));
+    } catch (e) {
+      if (abort.signal.aborted) toast("info", "Cancelled", "Nothing was changed.");
+      else toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const onApplyRules = async (chosen: ColumnRule[], opts: { highlight: boolean; validate: boolean }) => {
+    setRules(null);
+    const t = rulesTarget.current;
+    if (!t) return;
+    setJob({ text: "Checking the columns…" });
+    try {
+      const res = await applyColumnRules(t, chosen, opts);
+      const bad = res.filter((r) => r.violations);
+      const total = bad.reduce((n, r) => n + r.violations, 0);
+      toast(
+        total ? "warning" : "success",
+        total ? `${total.toLocaleString()} value${total === 1 ? "" : "s"} break the rules` : "All values pass",
+        bad.length
+          ? bad.map((r) => `${r.column}: ${r.violations} (${r.examples.join(", ")}${r.violations > r.examples.length ? "…" : ""})`).join(" · ") + (opts.highlight ? " – highlighted in red." : "")
+          : `${res.length} column${res.length === 1 ? "" : "s"} checked${opts.validate ? "; new entries are validated" : ""}.`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
   /* ------------------------------------------------------------ =ZEE function picker */
   const [fnDialog, setFnDialog] = useState<FunctionDialogState | null>(null);
 
@@ -988,6 +1164,14 @@ export default function App() {
         </header>
 
         <UpdateBanners newerVersion={updates.newerVersion} notes={updates.notes} onDismissNotes={updates.dismissNotes} />
+        {!offline.online && (
+          <MessageBar intent="warning" className="zee-banner">
+            <MessageBarBody>
+              You're offline. {offline.queued ? `${offline.queued} request${offline.queued === 1 ? "" : "s"} will be sent` : "Requests that fail are sent"} again automatically when the connection is back.
+            </MessageBarBody>
+          </MessageBar>
+        )}
+
         {!inExcel && (
           <MessageBar intent="warning" className="zee-banner">
             <MessageBarBody>Preview mode – open Zee AI from Excel to read and write cells. Chat still works.</MessageBarBody>
@@ -1025,6 +1209,11 @@ export default function App() {
           onDraw={openDraw}
           onPickFunction={onPickFunction}
           onFreeze={onFreeze}
+          onDailyReport={openDailyReport}
+          onEspLogTemplate={onEspLogTemplate}
+          onEspLogAnalyze={openEspLog}
+          onFormulaAudit={onFormulaAudit}
+          onSuggestRules={onSuggestRules}
         />
 
         {job && (
@@ -1088,6 +1277,9 @@ export default function App() {
         />
         <DrawDialog source={plotSource} onClose={() => setPlotSource(null)} onRun={onDraw} />
         <FunctionDialog state={fnDialog} onClose={() => setFnDialog(null)} onApply={(spec, values, header, where) => applyFunction(spec, values, header, where, fnDialog?.target ?? null)} />
+        <DailyReportDialog target={dailyTarget} onClose={() => setDailyTarget(null)} onRun={onDailyReport} />
+        <EspLogDialog headers={espLogHeaders} onClose={() => setEspLogHeaders(null)} onRun={onEspLog} />
+        <RulesDialog rules={rules} onClose={() => setRules(null)} onApply={onApplyRules} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />
       </InsertActionsContext.Provider>

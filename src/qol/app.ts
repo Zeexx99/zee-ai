@@ -21,6 +21,17 @@ export interface ReleaseNote {
 /** Shown once after an update ("What's new"). Newest first. */
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "1.6.0",
+    items: [
+      "Petroleum → Daily production report: per-well rates, change vs the previous reading, water cut, GOR, totals, highlights and a chart – then hand it to Word.",
+      "Petroleum → ESP failure log: create a ready-made log sheet, or analyze yours (run life, MTBF, causes, components, models, repeat wells, monthly trend, charts) with an AI summary.",
+      "Analyze → Formula audit: error values, #REF!, inconsistent formulas, typed values in formula columns and hard-coded numbers, with clickable links.",
+      "Analyze → Suggest data validation (AI): Zee proposes limits per column (e.g. water cut 0–100) – review them, highlight the values that break them and optionally add Excel validation.",
+      "The agent can now run the ESP failure analysis and the formula audit too.",
+      "Offline queue: requests that fail because the connection dropped are sent again automatically when it's back.",
+    ],
+  },
+  {
     version: "1.5.0",
     items: [
       "Remove empty rows / columns and Clean now show a preview (“will remove 412 rows”) before anything changes.",

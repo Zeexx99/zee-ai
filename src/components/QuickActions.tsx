@@ -24,6 +24,11 @@ export interface QuickActionHandlers {
   onDraw: () => void;
   onPickFunction: (spec: FnSpec) => void;
   onFreeze: () => void;
+  onDailyReport: () => void;
+  onEspLogTemplate: () => void;
+  onEspLogAnalyze: () => void;
+  onFormulaAudit: () => void;
+  onSuggestRules: () => void;
 }
 
 const MATH: AggregateFn[] = ["SUM", "AVERAGE", "MIN", "MAX"];
@@ -92,6 +97,14 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuDivider />
             <MenuItem onClick={p.onAnalyze}>Summarize selection</MenuItem>
             <MenuItem onClick={p.onChart}>Chart from selection…</MenuItem>
+            <MenuDivider />
+            <MenuGroupHeader>Checks</MenuGroupHeader>
+            <MenuItem onClick={p.onFormulaAudit} secondaryContent="this sheet">
+              Formula audit
+            </MenuItem>
+            <MenuItem onClick={p.onSuggestRules} secondaryContent="AI">
+              Suggest data validation…
+            </MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>
@@ -105,6 +118,9 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
         <MenuPopover>
           <MenuList>
             <MenuGroupHeader>Select your data first</MenuGroupHeader>
+            <MenuItem onClick={p.onDailyReport} secondaryContent="→ Word">
+              Daily production report…
+            </MenuItem>
             <MenuItem onClick={p.onDeclineCurve} secondaryContent="Arps">
               Decline curve analysis…
             </MenuItem>
@@ -116,6 +132,12 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             </MenuItem>
             <MenuItem onClick={p.onEspCheck} secondaryContent="AI">
               ESP performance check
+            </MenuItem>
+            <MenuDivider />
+            <MenuGroupHeader>ESP failure log</MenuGroupHeader>
+            <MenuItem onClick={p.onEspLogTemplate}>Create a failure log sheet</MenuItem>
+            <MenuItem onClick={p.onEspLogAnalyze} secondaryContent="MTBF">
+              Analyze failure log…
             </MenuItem>
           </MenuList>
         </MenuPopover>
