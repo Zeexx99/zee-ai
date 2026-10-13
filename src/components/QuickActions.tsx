@@ -29,6 +29,12 @@ export interface QuickActionHandlers {
   onEspLogAnalyze: () => void;
   onFormulaAudit: () => void;
   onSuggestRules: () => void;
+  onFindDupes: () => void;
+  onFillGaps: () => void;
+  onFixImport: () => void;
+  onExplainSheet: () => void;
+  onSheetGuide: () => void;
+  onNamedInputs: () => void;
 }
 
 const MATH: AggregateFn[] = ["SUM", "AVERAGE", "MIN", "MAX"];
@@ -74,6 +80,11 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuItem onClick={p.onClean}>Clean data…</MenuItem>
             <MenuItem onClick={p.onExtract}>Split / Extract…</MenuItem>
             <MenuDivider />
+            <MenuGroupHeader>Selected table</MenuGroupHeader>
+            <MenuItem onClick={p.onFindDupes}>Find duplicates & outliers…</MenuItem>
+            <MenuItem onClick={p.onFillGaps}>Fill gaps in time series…</MenuItem>
+            <MenuItem onClick={p.onFixImport}>Fix imported data…</MenuItem>
+            <MenuDivider />
             <MenuGroupHeader>Blank, 0 or NULL everywhere</MenuGroupHeader>
             <MenuItem onClick={p.onRemoveEmptyColumns}>Remove empty columns</MenuItem>
             <MenuItem onClick={p.onRemoveEmptyRows}>Remove empty rows</MenuItem>
@@ -105,6 +116,13 @@ export function QuickActions(p: QuickActionHandlers & { disabled?: boolean }) {
             <MenuItem onClick={p.onSuggestRules} secondaryContent="AI">
               Suggest data validation…
             </MenuItem>
+            <MenuDivider />
+            <MenuGroupHeader>This sheet</MenuGroupHeader>
+            <MenuItem onClick={p.onExplainSheet} secondaryContent="AI">
+              Explain this sheet
+            </MenuItem>
+            <MenuItem onClick={p.onSheetGuide}>Add a sheet guide tab</MenuItem>
+            <MenuItem onClick={p.onNamedInputs}>Move hard-coded numbers to inputs…</MenuItem>
           </MenuList>
         </MenuPopover>
       </Menu>

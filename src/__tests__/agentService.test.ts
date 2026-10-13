@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { WRITE_TOOLS, agentTools, convertColumn, describeCall } from "../services/agentService";
 
-const READ_TOOLS = new Set(["get_workbook_overview", "get_selection", "read_range", "find_cells", "fit_decline_curve", "esp_analysis", "web_search"]);
+const READ_TOOLS = new Set(["get_workbook_overview", "get_selection", "read_range", "profile_range", "find_cells", "fit_decline_curve", "esp_analysis", "web_search"]);
 
 describe("agent tools", () => {
   it("every tool is either a read tool or needs approval", () => {

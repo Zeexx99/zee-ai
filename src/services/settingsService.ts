@@ -64,6 +64,12 @@ export interface ZeeSettings {
   /** Optional prices (USD per 1M tokens) for the usage meter's cost estimate. 0 = unknown. */
   priceInPerM: number;
   priceOutPerM: number;
+  /** Agent approval card shows the cells before → after for each write (dry run). */
+  agentDryRun: boolean;
+  /** Very large selections are sent as column statistics + a sample instead of truncated cells. */
+  bigDataMode: boolean;
+  /** Rows from which big-data mode kicks in. */
+  bigDataRows: number;
 }
 
 export const DEFAULT_SETTINGS: ZeeSettings = {
@@ -88,6 +94,9 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   codeExecution: false,
   priceInPerM: 0,
   priceOutPerM: 0,
+  agentDryRun: true,
+  bigDataMode: true,
+  bigDataRows: 100_000,
 };
 
 export const STORAGE_KEY = "zeeai.settings.v1";
@@ -101,6 +110,7 @@ export function loadSettings(): ZeeSettings {
     if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "auto";
     if (!Number.isFinite(merged.priceInPerM) || merged.priceInPerM < 0) merged.priceInPerM = 0;
     if (!Number.isFinite(merged.priceOutPerM) || merged.priceOutPerM < 0) merged.priceOutPerM = 0;
+    if (!Number.isFinite(merged.bigDataRows) || merged.bigDataRows < 1000) merged.bigDataRows = DEFAULT_SETTINGS.bigDataRows;
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };

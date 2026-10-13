@@ -42,6 +42,7 @@ import { fitArps, prepareDca, arpsTimeToRate, arpsCum } from "../utils/petro";
 import { convertUnit, normalizeUnit, UNIT_HELP } from "../utils/units";
 import { analyzeEsp, parseCurve } from "../utils/espAnalysis";
 import { a1, quoteSheet } from "../utils/a1";
+import { summarizeLargeRange } from "./dataTools";
 
 export const AGENT_SYSTEM_PROMPT = `You are Zee AI, an expert Microsoft Excel agent running inside an Excel task pane. You can inspect and change the user's workbook with tools. The user is a petroleum engineer; production, well-test and ESP data are common.
 
@@ -53,6 +54,7 @@ HOW TO WORK
 - Don't overwrite existing data unless the user asked for it. Put new results in empty cells/columns (e.g. next to the data) or on a new sheet.
 - Use the dedicated tools instead of workarounds: insert_rows_columns / delete_rows_columns, sort_range, filter_range, conditional_format, data_validation, create_pivot_table, freeze_panes, find_cells / replace_text, copy_range, clear_range, add_named_range.
 - Petroleum: fit_decline_curve for Arps decline; production_qc for data-quality checks (writes a report sheet); esp_analysis for ESP performance (TDH, affinity laws, operating range, flags); esp_failure_analysis for run life / MTBF / failure causes from an ESP failure log; convert_units for unit columns.
+- For very large ranges (tens of thousands of rows) use profile_range for statistics over every row plus a sample, instead of read_range.
 - formula_audit checks a sheet's formulas (errors, #REF!, inconsistent formulas, hard-coded numbers) and writes a report sheet.
 - For charts, pass a contiguous data range whose first row holds the series names.
 - If the user attached images or PDFs (pump curves, well-test reports, scanned tables), read them carefully. When digitising a curve, sample enough points to follow its shape and say the values are read from the image (approximate).
@@ -303,6 +305,12 @@ const BASE_TOOLS: FunctionDeclaration[] = [
     parameters: { type: "OBJECT", properties: { address: { type: "STRING", description: "The log including its header row." }, sheet: SHEET }, required: ["address"] },
   },
   {
+    name: "profile_range",
+    description:
+      "Summarize a LARGE range without reading every cell: per-column statistics over all rows (count, blanks, min/max/mean, date span, top text values) plus ~50 sample rows (first, last, evenly spaced). Use for ranges too big for read_range.",
+    parameters: { type: "OBJECT", properties: { address: { type: "STRING", description: "Range including the header row, e.g. 'A1:H250000' or 'A:H'." }, sheet: SHEET }, required: ["address"] },
+  },
+  {
     name: "formula_audit",
     description:
       "Audit every formula on a sheet: error values (#DIV/0!, #N/A…), broken #REF! references, formulas that differ from the rest of their column, typed values in formula columns and hard-coded numbers. Writes a 'Formula Audit' sheet (clickable cell links) and returns counts plus the first findings.",
@@ -416,6 +424,8 @@ export function describeCall(c: ToolCall): string {
       return "Read the selected cells";
     case "read_range":
       return `Read ${where(a.address, a.sheet)}`;
+    case "profile_range":
+      return `Summarize ${where(a.address, a.sheet)} (statistics + sample)`;
     case "find_cells":
       return `Find "${a.text}"${a.sheet ? ` on ${a.sheet}` : ""}`;
     case "set_cells": {
@@ -528,6 +538,10 @@ export async function executeTool(c: ToolCall, ctx?: ToolContext): Promise<Recor
         return { selection: formatSelectionForPrompt(await getSelectionContext(2000)) };
       case "read_range":
         return { range: await readRangeText(String(a.address), s(a.sheet)) };
+      case "profile_range": {
+        const big = await summarizeLargeRange(String(a.address), s(a.sheet));
+        return { summary: big.text };
+      }
       case "find_cells": {
         const hits = await findCells(String(a.text ?? ""), { sheet: s(a.sheet), matchCase: a.match_case === true, wholeCell: a.whole_cell === true });
         return hits.length ? { matches: hits } : { matches: [], note: "No cells found." };

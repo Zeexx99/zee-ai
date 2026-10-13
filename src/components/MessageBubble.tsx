@@ -135,6 +135,53 @@ function ActionList({ actions }: { actions: ActionLog[] }) {
   );
 }
 
+type DryRun = NonNullable<PendingApproval["calls"][number]["dryRun"]>;
+
+/** Dry run: the real cells with their current value, and the new value where it changes. */
+function DryRunTable({ d }: { d: DryRun }) {
+  const removing = !d.title.startsWith("Cells") && !d.title.startsWith("Formatting");
+  return (
+    <div className="zee-dryrun">
+      <div className="zee-dryrun-title">{d.title}</div>
+      {d.rows.length > 0 && (
+        <table className="zee-approval-preview zee-dryrun-table">
+          <thead>
+            <tr>
+              <th />
+              {d.columns.map((c) => (
+                <th key={c}>{c}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {d.rows.map((r) => (
+              <tr key={r.row}>
+                <th>{r.row}</th>
+                {r.cells.map((cell, ci) => {
+                  const changes = cell.after !== undefined && cell.after !== cell.before;
+                  return (
+                    <td key={ci} className={changes ? "zee-dry-changed" : removing && cell.before ? "zee-dry-removed" : undefined} title={changes ? `${cell.before || "(empty)"} → ${cell.after}` : cell.before}>
+                      {changes ? (
+                        <>
+                          {cell.before && <s>{cell.before}</s>}
+                          <span>{cell.after}</span>
+                        </>
+                      ) : (
+                        cell.before
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {d.more && <div className="zee-muted">{d.more}</div>}
+    </div>
+  );
+}
+
 function ApprovalCard({ pending }: { pending: PendingApproval }) {
   const actions = useInsertActions();
   return (
@@ -151,7 +198,9 @@ function ApprovalCard({ pending }: { pending: PendingApproval }) {
                 <Warning16Regular /> Replaces existing data in {c.overwrites.replace(/^.*!/, "")}
               </div>
             )}
-            {c.preview && (
+            {c.dryRun ? (
+              <DryRunTable d={c.dryRun} />
+            ) : c.preview && (
               <table className="zee-approval-preview">
                 <tbody>
                   {c.preview.map((r, ri) => (

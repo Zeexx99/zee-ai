@@ -6,6 +6,7 @@ import { AGENT_SYSTEM_PROMPT, WRITE_TOOLS, agentTools, describeCall, executeTool
 import { runAgentLoop, type ActionLog } from "../services/agentLoop";
 import { clearChat, getDocId, loadChat, saveChat } from "../services/chatStore";
 import { invalidateOverview, writeTargetHasData } from "../services/excelService";
+import { dryRunPreview, type DryRunPreview } from "../services/dataTools";
 
 export type { ActionLog };
 
@@ -17,7 +18,14 @@ export interface AttachmentInfo {
 }
 
 export interface PendingApproval {
-  calls: Array<{ description: string; preview: string[][] | null; /** Address whose existing data would be replaced. */ overwrites?: string | null }>;
+  calls: Array<{
+    description: string;
+    preview: string[][] | null;
+    /** Address whose existing data would be replaced. */
+    overwrites?: string | null;
+    /** Dry run: the affected cells before → after (Settings → Agent mode). */
+    dryRun?: DryRunPreview | null;
+  }>;
 }
 
 export interface ChatMessage {
@@ -257,7 +265,8 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
           autoApprove: () => getSettings().autoApprove,
           approve: async (writes) => {
             const overwrites = await Promise.all(writes.map((c) => (c.name === "set_cells" ? writeTargetHasData(c.args).catch(() => null) : Promise.resolve(null))));
-            patch(asstId, { pending: { calls: writes.map((c, i) => ({ description: describeCall(c), preview: previewCall(c), overwrites: overwrites[i] })) } });
+            const dry = getSettings().agentDryRun ? await Promise.all(writes.map((c) => dryRunPreview(c.name, c.args ?? {}))) : writes.map(() => null);
+            patch(asstId, { pending: { calls: writes.map((c, i) => ({ description: describeCall(c), preview: previewCall(c), overwrites: overwrites[i], dryRun: dry[i] })) } });
             const ok = await new Promise<boolean>((resolve) => {
               approvalRef.current = resolve;
               controller.signal.addEventListener("abort", () => resolve(false), { once: true });

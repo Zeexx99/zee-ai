@@ -21,6 +21,18 @@ export interface ReleaseNote {
 /** Shown once after an update ("What's new"). Newest first. */
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "1.7.0",
+    items: [
+      "Clean → Find duplicates & outliers: duplicate rows, spellings that differ (\"Well-12\" vs \"W12\") and unusual numbers – highlight them, unify spellings or delete duplicates. Undoable.",
+      "Clean → Fill gaps in time series: adds the missing dates per well and fills values (straight line, previous value, or dates only) on a new sheet, with filled cells marked.",
+      "Clean → Fix imported data: numbers stored as text, Arabic digits, units stuck to numbers (\"1,250 bbl\") and mixed date formats – with a preview first. Undoable.",
+      "Analyze → Explain this sheet (AI) and Add a sheet guide tab: inputs, calculated columns, formula patterns and what feeds what.",
+      "Analyze → Move hard-coded numbers to inputs: puts numbers like 5.615 on an Inputs sheet as named cells and rewrites the formulas. Also offered after a formula audit.",
+      "Agent dry run: the approval card now shows the real cells before → after (Settings → Agent mode, on by default).",
+      "Big-data mode: selections from 100,000 rows are sent as statistics over every row plus a sample instead of being cut off (Settings → Sheet context). The agent gets a profile_range tool for the same.",
+    ],
+  },
+  {
     version: "1.6.0",
     items: [
       "Petroleum → Daily production report: per-well rates, change vs the previous reading, water cut, GOR, totals, highlights and a chart – then hand it to Word.",

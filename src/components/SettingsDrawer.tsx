@@ -309,6 +309,12 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
             onChange={(_, d) => onChange({ autoApprove: d.checked })}
             label="Apply changes without asking (not recommended)"
           />
+          <Switch
+            checked={settings.agentDryRun}
+            disabled={!settings.agentMode || settings.autoApprove}
+            onChange={(_, d) => onChange({ agentDryRun: d.checked })}
+            label="Dry run: show cells before → after in the approval card"
+          />
           <p className="zee-muted">Every change is listed for approval first and can be undone step by step with ↶.</p>
         </section>
 
@@ -352,6 +358,24 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
               onChange={(_, d) => {
                 const n = Number(d.value);
                 if (Number.isFinite(n)) onChange({ maxContextCells: Math.min(20000, Math.max(50, Math.round(n))) });
+              }}
+            />
+          </Field>
+          <Switch
+            checked={settings.bigDataMode}
+            onChange={(_, d) => onChange({ bigDataMode: d.checked })}
+            label="Big-data mode: summarize very large selections (column statistics + a sample)"
+          />
+          <Field label="Big-data mode from (rows)" hint="Selections with at least this many rows are summarized over every row instead of cut off. Shown as “big-data mode” on the message.">
+            <Input
+              type="number"
+              min={1000}
+              step={10000}
+              disabled={!settings.bigDataMode}
+              value={String(settings.bigDataRows)}
+              onChange={(_, d) => {
+                const n = Number(d.value);
+                if (Number.isFinite(n)) onChange({ bigDataRows: Math.min(1_000_000, Math.max(1000, Math.round(n))) });
               }}
             />
           </Field>

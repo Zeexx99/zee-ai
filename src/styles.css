@@ -946,3 +946,79 @@ body.zee-light {
 .zee-rule-num {
   width: 110px;
 }
+
+/* Data tools (duplicates & outliers, gap filler, named inputs) */
+.zee-dialog-wide {
+  max-width: 640px;
+}
+.zee-finding ul {
+  margin: 4px 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.zee-swatch {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #242424;
+}
+.zee-swatch-dup {
+  background: #fff2cc;
+}
+.zee-swatch-var {
+  background: #ddebf7;
+}
+.zee-swatch-out {
+  background: #f8cbad;
+}
+.zee-const-list {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.zee-const {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--zee-border);
+}
+.zee-const .zee-row > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.zee-const code {
+  font-size: 11px;
+}
+.zee-invalid {
+  outline: 1px solid #d13438;
+}
+.zee-error-text {
+  color: #d13438;
+  font-size: 12px;
+}
+
+/* Agent dry run (approval card) */
+.zee-dryrun-title {
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.zee-dryrun-table th {
+  font-weight: 600;
+  padding: 1px 5px;
+  color: var(--zee-muted, #616161);
+  background: transparent;
+}
+.zee-dryrun-table td.zee-dry-changed {
+  background: #e7f5e9;
+  color: #242424;
+}
+.zee-dryrun-table td.zee-dry-changed s {
+  color: #a4262c;
+  margin-right: 4px;
+}
+.zee-dryrun-table td.zee-dry-removed {
+  background: #fde7e9;
+  color: #242424;
+  text-decoration: line-through;
+}

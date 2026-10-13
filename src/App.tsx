@@ -63,6 +63,26 @@ import {
 import { InsertActionsContext, copyText, type InsertActions } from "./components/insertActions";
 import { UpdateBanners, useUpdates } from "./qol/UpdateBanners";
 import { DailyReportDialog, EspLogDialog, RulesDialog, type DailyReportTarget } from "./components/ToolDialogs";
+import { ConstantsDialog, DupesDialog, GapDialog } from "./components/DataToolDialogs";
+import {
+  applyConstants,
+  applyDupes,
+  applyImportFix,
+  previewImportFix,
+  runGapFill,
+  runSheetMap,
+  scanConstants,
+  scanDupes,
+  selectionRowCount,
+  summarizeLargeRange,
+  writeSheetGuide,
+  type ConstantChoice,
+  type ConstantsScan,
+  type DupeChoice,
+  type DupeScan,
+} from "./services/dataTools";
+import { EXPLAIN_SHEET_PROMPT } from "./utils/sheetMap";
+import type { GapOptions } from "./utils/gaps";
 import {
   ESP_FAILURE_PROMPT,
   applyColumnRules,
@@ -343,7 +363,12 @@ export default function App() {
     async (force = false): Promise<[string, string | undefined]> => {
       if (!inExcel || (!force && !settingsRef.current.includeSelection)) return ["", undefined];
       try {
-        const ctx = await getSelectionContext(settingsRef.current.maxContextCells);
+        const st = settingsRef.current;
+        if (st.bigDataMode && (await selectionRowCount().catch(() => 0)) >= st.bigDataRows) {
+          const big = await summarizeLargeRange(null);
+          return [`\n\n${big.text}`, `${big.address} · big-data mode: ${big.rows.toLocaleString()} rows summarized + ${big.sampled} sampled`];
+        }
+        const ctx = await getSelectionContext(st.maxContextCells);
         const label = `${ctx.sheetName}!${stripSheet(ctx.isEmpty ? ctx.selectionAddress : ctx.address)}${ctx.truncated ? " (truncated)" : ""}`;
         return [`\n\n${formatSelectionForPrompt(ctx)}`, label];
       } catch (e) {
@@ -818,8 +843,152 @@ export default function App() {
   };
 
 
-  /* ------------------------------------------------------------ daily report, ESP failure log, audit, validation */
+  /* ------------------------------------------------------------ data tools: duplicates, gaps, import fix, sheet map, named inputs */
   const toolSel = useRef<HeaderedSelection | null>(null);
+  const [dupeScan, setDupeScan] = useState<DupeScan | null>(null);
+  const openFindDupes = async () => {
+    setJob({ text: "Looking for duplicates, spelling variants and outliers…" });
+    try {
+      setDupeScan(scanDupes(await readHeaderedSelection("table")));
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const onApplyDupes = async (c: DupeChoice) => {
+    const scan = dupeScan;
+    setDupeScan(null);
+    if (!scan) return;
+    setJob({ text: "Applying…" });
+    try {
+      const r = await applyDupes(scan, c);
+      const parts = [r.highlighted ? `${r.highlighted} highlighted` : "", r.unified ? `${r.unified} spellings unified` : "", r.deleted ? `${r.deleted} duplicate rows deleted` : ""].filter(Boolean);
+      toast("success", parts.join(" · ") || "Done", r.undoable ? "Undo with ↶ or the history list." : "Too large to undo – keep a copy if unsure.");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const [gapHeaders, setGapHeaders] = useState<string[] | null>(null);
+  const openFillGaps = async () => {
+    try {
+      const sel = await readHeaderedSelection("time series (a Date column, optionally Well, and values)");
+      toolSel.current = sel;
+      setGapHeaders(sel.headers);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const onFillGaps = async (o: GapOptions) => {
+    setGapHeaders(null);
+    const sel = toolSel.current;
+    if (!sel) return;
+    setJob({ text: "Filling gaps…" });
+    try {
+      const { sheet, result } = await runGapFill(sel, o);
+      const st = result.stats;
+      const step = st.step.kind === "month" ? "monthly" : st.step.days === 1 ? "daily" : `every ${st.step.days} days`;
+      toast(
+        st.addedRows || st.filledCells ? "success" : "info",
+        `${st.addedRows} rows added · ${st.filledCells} cells filled`,
+        `${step} data${st.groups > 1 ? `, ${st.groups} wells` : ""} → sheet "${sheet}".${st.skippedGaps ? ` ${st.skippedGaps} long gap${st.skippedGaps === 1 ? "" : "s"} left alone.` : ""}`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const onFixImport = async () => {
+    setJob({ text: "Checking the imported data…" });
+    try {
+      const sel = await readHeaderedSelection("imported table");
+      const p = await previewImportFix(sel);
+      setJob(null);
+      const headerChanges = p.plans.filter((x) => x.newHeader);
+      if (!p.changes && !headerChanges.length) {
+        toast("success", "Nothing to fix", `${sel.block.address} already has proper numbers and dates.`);
+        return;
+      }
+      const lines = [
+        `${p.changes.toLocaleString()} cells will be converted: ${p.byKind.number.toLocaleString()} to numbers, ${p.byKind.date.toLocaleString()} to dates, ${p.byKind.text.toLocaleString()} text tidied (Arabic digits, extra spaces).`,
+        ...(headerChanges.length ? [`Units moved into headers: ${headerChanges.map((x) => `"${x.header}" → "${x.newHeader}"`).join(", ")}`] : []),
+        ...(p.otherUnits ? [`${p.otherUnits} cells have a different unit than the rest of their column – left as they are.`] : []),
+        "",
+        "Examples:",
+        ...p.samples.map((x) => `${x.address}:  "${x.before}"  →  ${x.after}`),
+        "",
+        "Formulas are not touched.",
+      ];
+      const ok = await askConfirm({ title: "Fix imported data?", message: lines.join("\n"), confirmLabel: "Fix" });
+      if (!ok) return;
+      setJob({ text: "Fixing…" });
+      const r = await applyImportFix(p);
+      toast("success", `${r.changed.toLocaleString()} cells fixed${r.headers ? `, ${r.headers} headers` : ""}`, r.undoable ? "Undo with ↶ or the history list." : "Too large to undo – keep a copy if unsure.");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const onExplainSheet = async () => {
+    if (!ensureConfigured()) return;
+    setJob({ text: "Mapping the sheet's formulas…" });
+    try {
+      const m = await runSheetMap();
+      setJob(null);
+      await send({ display: `Explain sheet "${m.sheet}"`, prompt: `${EXPLAIN_SHEET_PROMPT}\n\n${m.digest}`, contextLabel: `${m.sheet}!${stripSheet(m.address)} · ${m.map.formulaCount} formulas`, forceChat: true });
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const onSheetGuide = async () => {
+    setJob({ text: "Building the sheet guide…" });
+    try {
+      const m = await runSheetMap();
+      const name = await writeSheetGuide(m);
+      toast("success", `Guide added: "${name}"`, `${m.map.columns.filter((c) => c.role === "input").length} input and ${m.map.columns.filter((c) => c.role === "calculated").length} calculated columns, ${m.map.groups.length} formula patterns.`);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const [constScan, setConstScan] = useState<ConstantsScan | null>(null);
+  const openNamedInputs = async (sheet?: string) => {
+    setJob({ text: "Looking for hard-coded numbers…" });
+    try {
+      setConstScan(await scanConstants(sheet));
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const onApplyConstants = async (chosen: ConstantChoice[]) => {
+    const scan = constScan;
+    setConstScan(null);
+    if (!scan) return;
+    setJob({ text: "Creating named inputs…" });
+    try {
+      const r = await applyConstants(scan, chosen);
+      toast("success", `${r.names} named input${r.names === 1 ? "" : "s"} created`, `${r.formulas} formulas on "${scan.sheet}" now use them – values are on sheet "${r.inputsSheet}". Undo with ↶.`);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  /* ------------------------------------------------------------ daily report, ESP failure log, audit, validation */
   const [dailyTarget, setDailyTarget] = useState<DailyReportTarget | null>(null);
   const openDailyReport = async () => {
     try {
@@ -915,6 +1084,14 @@ export default function App() {
             forceChat: true,
           });
         }
+      }
+      if (r.counts.hardcoded) {
+        const ok = await askConfirm({
+          title: "Move hard-coded numbers to inputs?",
+          message: `${r.counts.hardcoded} formula${r.counts.hardcoded === 1 ? " has" : "s have"} numbers typed into them. Zee AI can put those numbers on an Inputs sheet as named cells and rewrite the formulas to use the names – you pick which ones.`,
+          confirmLabel: "Choose numbers…",
+        });
+        if (ok) await openNamedInputs(r.source);
       }
     } catch (e) {
       if (abort.signal.aborted) toast("info", "Cancelled", "Nothing was changed.");
@@ -1214,6 +1391,12 @@ export default function App() {
           onEspLogAnalyze={openEspLog}
           onFormulaAudit={onFormulaAudit}
           onSuggestRules={onSuggestRules}
+          onFindDupes={openFindDupes}
+          onFillGaps={openFillGaps}
+          onFixImport={onFixImport}
+          onExplainSheet={onExplainSheet}
+          onSheetGuide={onSheetGuide}
+          onNamedInputs={() => openNamedInputs()}
         />
 
         {job && (
@@ -1280,6 +1463,9 @@ export default function App() {
         <DailyReportDialog target={dailyTarget} onClose={() => setDailyTarget(null)} onRun={onDailyReport} />
         <EspLogDialog headers={espLogHeaders} onClose={() => setEspLogHeaders(null)} onRun={onEspLog} />
         <RulesDialog rules={rules} onClose={() => setRules(null)} onApply={onApplyRules} />
+        <DupesDialog scan={dupeScan} onClose={() => setDupeScan(null)} onApply={onApplyDupes} />
+        <GapDialog headers={gapHeaders} onClose={() => setGapHeaders(null)} onRun={onFillGaps} />
+        <ConstantsDialog scan={constScan} onClose={() => setConstScan(null)} onApply={onApplyConstants} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />
       </InsertActionsContext.Provider>
