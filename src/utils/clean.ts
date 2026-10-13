@@ -202,3 +202,20 @@ export function runsDescending(indexes: number[]): { start: number; count: numbe
   }
   return runs.reverse();
 }
+
+/**
+ * Human-readable list of line numbers for previews: "5, 9, 12–20 and 3 more".
+ * `indexes` are 0-based offsets; `label` turns one into a row number or column letter.
+ */
+export function describeLines(indexes: number[], label: (i: number) => string, maxParts = 6): string {
+  const sorted = Array.from(new Set(indexes)).sort((a, b) => a - b);
+  const runs: Array<[number, number]> = [];
+  for (const i of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[1] + 1) last[1] = i;
+    else runs.push([i, i]);
+  }
+  const parts = runs.map(([a, b]) => (a === b ? label(a) : `${label(a)}–${label(b)}`));
+  if (parts.length <= maxParts) return parts.join(", ");
+  return `${parts.slice(0, maxParts).join(", ")} and ${parts.length - maxParts} more`;
+}

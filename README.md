@@ -22,6 +22,11 @@ Zee AI is an Excel task-pane add-in (Windows, Mac, Excel on the web) built with 
 | **Per-workbook history** | The chat is saved for each workbook and comes back when you reopen it. When browser storage fills up, the oldest messages are dropped first. |
 | **Cost guard** | Asks before sending a very large prompt, and before running AI on many rows. It also shows token usage per message and per session. |
 | **Auth** | Gemini API key, Google sign-in (Vertex AI quota), or a **team proxy** that keeps the key on a server (`proxy/`), with per-person tokens, an origin lock, a daily request cap and a size limit. |
+| **Previews & progress** | Clean and Remove empty rows / columns show what will change ("Remove 412 empty rows: 5, 9, 12–20 and 3 more?") before anything happens. Long scans show a progress bar with **Cancel**. |
+| **Change history** | The clock icon next to ↶ lists Zee AI's recent changes with times. Revert just one (when no newer change touched that sheet) or undo back to any point. |
+| **Excel tables from chat** | Tables in answers: **Insert table** at the selected cell, or **Insert as Excel table** (filters + banded rows, undoable). |
+| **Quality of life** | Selection chip (e.g. `Sheet1!A1:F200`) with × to leave it out of the next message, ↑/↓ recalls earlier prompts, favourite prompts as chips, the unsent draft survives closing the pane, copy / edit & resend / regenerate on every message, Esc stops, friendly errors with Retry + Copy diagnostics, today's token usage (and cost if you enter prices), "What's new" after updates, a banner when a newer version is online, and Settings → Backup & updates (export / import settings, Reload latest version). |
+| **update-all.bat** | Builds, tests and publishes the Excel **and** Word add-ins in one go, waits until GitHub Pages serves both new versions, then clears Office's add-in cache. |
 
 ---
 

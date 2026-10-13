@@ -4,8 +4,9 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { common } from "lowlight";
 import excel from "highlight.js/lib/languages/excel";
-import { Button, Spinner, Tooltip } from "@fluentui/react-components";
-import { Add16Regular, ArrowRight16Regular, Attach16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, DocumentPdf16Regular, ErrorCircle16Regular, Eye16Regular, Globe16Regular, Image16Regular, Prohibited16Regular, Warning16Regular, Wrench16Regular } from "@fluentui/react-icons";
+import { Button, Menu, MenuItem, MenuList, MenuPopover, MenuTrigger, Spinner, SplitButton, Tooltip, type MenuButtonProps } from "@fluentui/react-components";
+import { Add16Regular, ArrowRight16Regular, Attach16Regular, Checkmark16Regular, Copy16Regular, Dismiss16Regular, DocumentPdf16Regular, ErrorCircle16Regular, Eye16Regular, Globe16Regular, Image16Regular, Prohibited16Regular, Table16Regular, Warning16Regular, Wrench16Regular } from "@fluentui/react-icons";
+import { ErrorBubble, RegenerateButton, UserMessageTools } from "../qol/MessageTools";
 import type { ActionLog, ChatMessage, PendingApproval } from "../hooks/useChat";
 import { formulasFromCode, hastTableToMatrix, hastText, parseDelimited, type HastLike } from "../utils/markdown";
 import { copyText, openExternal, useInsertActions } from "./insertActions";
@@ -80,9 +81,32 @@ function TableBlock({ node, children, streaming }: { node?: HastLike; children: 
           table · {Math.max(0, matrix.length - 1)} rows × {matrix[0]?.length ?? 0} cols
         </span>
         <span className="zee-spacer" />
-        <Button size="small" appearance="primary" icon={<Add16Regular />} disabled={streaming || matrix.length === 0} onClick={() => actions.insertTable(matrix)}>
-          Insert table
-        </Button>
+        <Menu positioning="below-end">
+          <MenuTrigger disableButtonEnhancement>
+            {(triggerProps: MenuButtonProps) => (
+              <SplitButton
+                size="small"
+                appearance="primary"
+                icon={<Add16Regular />}
+                disabled={streaming || matrix.length === 0}
+                menuButton={triggerProps}
+                primaryActionButton={{ onClick: () => actions.insertTable(matrix), title: "Insert at the selected cell" }}
+              >
+                Insert table
+              </SplitButton>
+            )}
+          </MenuTrigger>
+          <MenuPopover>
+            <MenuList>
+              <MenuItem icon={<Add16Regular />} onClick={() => actions.insertTable(matrix)}>
+                Insert at the selected cell
+              </MenuItem>
+              <MenuItem icon={<Table16Regular />} disabled={matrix.length < 2} onClick={() => actions.insertTable(matrix, true)}>
+                Insert as Excel table (filters, banded rows)
+              </MenuItem>
+            </MenuList>
+          </MenuPopover>
+        </Menu>
         <CopyButton text={tsv} />
       </div>
     </div>
@@ -244,19 +268,12 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
           </div>
         ))}
         {message.contextLabel && <div className="zee-chip">📎 {message.contextLabel}</div>}
+        <UserMessageTools text={message.text} />
       </div>
     );
   }
 
-  if (message.status === "error") {
-    return (
-      <div className="zee-msg zee-msg-assistant">
-        <div className="zee-bubble zee-bubble-error">
-          <ErrorCircle16Regular /> <span>{message.text}</span>
-        </div>
-      </div>
-    );
-  }
+  if (message.status === "error") return <ErrorBubble message={message} />;
 
   const working = streaming && !message.text && !message.pending;
   return (
@@ -287,6 +304,7 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
             </span>
           )}
           <span className="zee-spacer" />
+          <RegenerateButton message={message} />
           <CopyButton text={message.text} />
         </div>
       )}

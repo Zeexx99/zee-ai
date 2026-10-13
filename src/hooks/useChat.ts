@@ -41,6 +41,8 @@ export interface ChatMessage {
   sources?: Source[];
   /** The agent stopped at its step limit – show a Continue button. */
   canContinue?: boolean;
+  /** GeminiError kind of a failed answer (drives the hint under the error). */
+  errorKind?: string;
 }
 
 export interface SendInput {
@@ -175,7 +177,7 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
             : new GeminiError((e as Error)?.message ?? String(e));
       patch(asstId, (x) => {
         if (err.kind === "aborted") return { text: x.text ? `${x.text}\n\n_…stopped._` : "_Stopped._", status: "done", pending: undefined };
-        return { text: err.message, status: "error", pending: undefined };
+        return { text: err.message, status: "error", pending: undefined, errorKind: err.kind };
       });
     },
     [patch]
@@ -307,6 +309,32 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
     return send({ display: "Continue", prompt: "Continue the task where you left off. Check the workbook state first if needed.", forceAgent: true });
   }, [send, update]);
 
+  /**
+   * Regenerate / Retry: removes the answer and its prompt and sends the same prompt again (same
+   * sheet context as the first time, same mode). Files attached to it aren't kept, so those can't be resent.
+   */
+  const retry = useCallback(
+    async (asstId: string) => {
+      if (abortRef.current) return;
+      const list = messagesRef.current;
+      const i = list.findIndex((m) => m.id === asstId);
+      if (i < 1 || list[i].role !== "assistant" || list[i - 1].role !== "user") return;
+      const user = list[i - 1];
+      const next = list.filter((_, k) => k !== i && k !== i - 1);
+      messagesRef.current = next; // begin() builds the history from the ref right away
+      update(() => next);
+      const mode = list[i].mode ?? user.mode;
+      await send({
+        display: user.text,
+        prompt: user.promptText ?? user.text,
+        contextLabel: user.contextLabel,
+        forceAgent: mode === "agent",
+        forceChat: mode === "chat",
+      });
+    },
+    [send, update]
+  );
+
   const respondToApproval = useCallback((approved: boolean) => approvalRef.current?.(approved), []);
   const stop = useCallback(() => abortRef.current?.abort(), []);
   const clear = useCallback(() => {
@@ -315,5 +343,5 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
     update(() => []);
   }, [update]);
 
-  return { messages, busy, send, stop, clear, respondToApproval, continueAgent };
+  return { messages, busy, send, retry, stop, clear, respondToApproval, continueAgent };
 }

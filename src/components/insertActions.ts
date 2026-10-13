@@ -1,14 +1,24 @@
 import { createContext, useContext } from "react";
 import type { Cell } from "../utils/markdown";
+import type { ChatMessage } from "../hooks/useChat";
 
 /** Actions that chat output can trigger (implemented in App, which owns confirm + toasts). */
 export interface InsertActions {
   insertFormulas: (formulas: string[]) => Promise<void>;
-  insertTable: (matrix: Cell[][]) => Promise<void>;
+  /** asTable = formatted Excel table with filters (otherwise plain cells with a bold header). */
+  insertTable: (matrix: Cell[][], asTable?: boolean) => Promise<void>;
   /** Agent mode: approve or reject the pending batch of workbook changes. */
   respondToApproval: (approved: boolean) => void;
   /** Agent mode: keep going after the step limit. */
   continueAgent: () => void;
+  /** Run an answer again (Regenerate / Retry). */
+  retry: (assistantId: string) => void;
+  /** Put a prompt back into the chat box to edit and resend it. */
+  editPrompt: (text: string) => void;
+  /** Copy a diagnostics report for a failed answer. */
+  copyDiagnostics: (message: ChatMessage) => void;
+  /** A request is running (Regenerate is disabled meanwhile). */
+  busy: boolean;
 }
 
 export const InsertActionsContext = createContext<InsertActions | null>(null);

@@ -33,6 +33,20 @@ function clientLog(): Plugin {
   }
 }
 
+/**
+ * Writes build.json next to the page: { version, build }. The pane compares it with its own build to
+ * show "A newer version is online", and update-all.bat polls it to know when GitHub Pages is live.
+ */
+function buildInfo(info: { version: string; build: string }): Plugin {
+  return {
+    name: "zee-build-info",
+    apply: "build",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "build.json", source: JSON.stringify(info) });
+    },
+  };
+}
+
 // Office requires the task pane to be served over HTTPS.
 // office-addin-dev-certs creates and trusts a localhost certificate (run `npm run certs` once).
 // Port 3100 (not 3000) to avoid clashing with other local dev servers.
@@ -41,14 +55,15 @@ export default defineConfig(async ({ command }) => {
   // (Also none when Vitest runs the unit tests – it uses the "serve" command internally.)
   const https = command === "serve" && !process.env.VITEST ? await getHttpsServerOptions() : undefined;
   const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string };
+  const build = new Date().toISOString();
   return {
     // Relative base so the same build works on https://localhost:3100/ and https://<user>.github.io/zee-ai/
     base: "./",
-    plugins: [react(), clientLog()],
+    plugins: [react(), clientLog(), buildInfo({ version: pkg.version, build })],
     // Shown in Settings → About, so you can tell which build Excel actually loaded.
     define: {
       __ZEE_VERSION__: JSON.stringify(pkg.version),
-      __ZEE_BUILD__: JSON.stringify(new Date().toISOString()),
+      __ZEE_BUILD__: JSON.stringify(build),
     },
     server: { port: 3100, strictPort: true, https },
     preview: { port: 3100, strictPort: true, https },

@@ -765,3 +765,169 @@ body.zee-light {
 .zee-continue {
   margin-top: 6px;
 }
+
+/* ================================================================ quality-of-life additions (src/qol) */
+
+/* Favourite prompts as chips above the chat box */
+.zee-prompt-chips {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 4px;
+  scrollbar-width: thin;
+}
+.zee-prompt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--zee-text);
+  background: var(--zee-surface);
+  border: 1px solid var(--zee-border);
+  border-radius: 999px;
+  padding: 2px 9px 2px 6px;
+  cursor: pointer;
+}
+.zee-prompt-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zee-prompt-chip:hover,
+.zee-prompt-chip:focus-visible {
+  border-color: var(--zee-user);
+  outline: none;
+}
+.zee-prompt-chip-star {
+  color: #e8a400;
+  flex: 0 0 auto;
+}
+
+/* Selection chip with × */
+.zee-context-chip {
+  padding-right: 0;
+  gap: 0;
+  max-width: 60%;
+}
+.zee-context-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zee-chip-x {
+  min-width: 0 !important;
+  height: 18px !important;
+  padding: 0 4px !important;
+}
+.zee-chip-ignored .zee-context-chip-label {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.zee-usage-meter {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.zee-input-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--zee-muted);
+  padding: 2px 0 4px;
+}
+
+/* Copy / Edit under user messages – visible on hover or keyboard focus */
+.zee-msg-tools {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.zee-msg-user:hover .zee-msg-tools,
+.zee-msg-tools:focus-within {
+  opacity: 1;
+}
+@media (hover: none) {
+  .zee-msg-tools {
+    opacity: 1;
+  }
+}
+
+/* Friendly error bubble */
+.zee-bubble-error {
+  flex-direction: column;
+}
+.zee-error-line {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+.zee-error-hint {
+  color: var(--zee-text);
+  font-size: 12px;
+  opacity: 0.85;
+}
+.zee-error-actions {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* What's new */
+.zee-whatsnew-list {
+  margin: 4px 0 2px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.zee-whatsnew-list li {
+  margin: 2px 0;
+}
+
+/* Usage table in Settings */
+.zee-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.zee-usage-table th,
+.zee-usage-table td {
+  text-align: right;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--zee-border);
+  white-space: nowrap;
+}
+.zee-usage-table th:first-child,
+.zee-usage-table tbody th {
+  text-align: left;
+  font-weight: 600;
+}
+.zee-usage-table thead th {
+  color: var(--zee-muted);
+  font-weight: 500;
+}
+
+/* Long jobs */
+.zee-job-progress {
+  margin-top: 6px;
+  min-width: 160px;
+}
+
+.zee-history-popover {
+  max-width: 340px;
+}
+
+.zee-file-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.zee-file-pick input[type="file"] {
+  font-size: 12px;
+  max-width: 100%;
+}

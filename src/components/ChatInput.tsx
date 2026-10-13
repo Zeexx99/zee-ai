@@ -1,9 +1,11 @@
-import { useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { Button, Menu, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Switch, Textarea, Tooltip } from "@fluentui/react-components";
-import { Attach20Regular, Bookmark20Regular, BookmarkAdd20Regular, Delete16Regular, Dismiss12Regular, DocumentPdf16Regular, Image16Regular, Send20Filled, Stop20Filled } from "@fluentui/react-icons";
+import { Attach20Regular, Bookmark20Regular, Delete16Regular, Dismiss12Regular, DocumentPdf16Regular, Image16Regular, Send20Filled, Star16Regular, Stop20Filled } from "@fluentui/react-icons";
 import { loadPrompts, savePrompts } from "../services/promptStore";
 import type { Attachment } from "../services/geminiService";
 import { ACCEPT_ATTR, mimeOf, pickFiles, readAsBase64 } from "../utils/files";
+import { ContextChip, PromptChips, UsageMeter, usePromptBox } from "../qol/inputHelpers";
+import type { DayUsage, Prices } from "../qol/usageLog";
 
 const short = (p: string) => (p.length > 70 ? `${p.slice(0, 68)}…` : p);
 
@@ -14,12 +16,40 @@ interface Props {
   includeSelection: boolean;
   selectedAddress: string | null;
   onToggleSelection: (v: boolean) => void;
+  /** Leave the selection out of the next message (× on the chip). */
+  ignoreSelection: boolean;
+  onIgnoreSelection: (v: boolean) => void;
+  today: DayUsage;
+  prices: Prices;
+  /** Text to put into the box (Edit & resend); `n` changes on every request. */
+  inject?: { text: string; n: number } | null;
   onSend: (text: string, attachments?: Attachment[]) => void;
   onStop: () => void;
 }
 
-export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, selectedAddress, onToggleSelection, onSend, onStop }: Props) {
-  const [text, setText] = useState("");
+export function ChatInput({
+  busy,
+  agentMode,
+  onToggleAgent,
+  includeSelection,
+  selectedAddress,
+  onToggleSelection,
+  ignoreSelection,
+  onIgnoreSelection,
+  today,
+  prices,
+  inject,
+  onSend,
+  onStop,
+}: Props) {
+  const { text, setText, onRecallKey, onSent } = usePromptBox();
+  const box = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!inject) return;
+    setText(inject.text);
+    window.setTimeout(() => box.current?.focus(), 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inject?.n]);
   const [files, setFiles] = useState<Attachment[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -66,12 +96,18 @@ export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, se
     const t = text.trim();
     if ((!t && !files.length) || busy) return;
     onSend(t, files.length ? files : undefined);
-    setText("");
+    onSent(t);
     setFiles([]);
     setFileError(null);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape" && busy) {
+      e.preventDefault();
+      onStop();
+      return;
+    }
+    if (onRecallKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -94,17 +130,14 @@ export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, se
         <Tooltip content="Agent mode: Zee AI can read and change the workbook (you approve each change)" relationship="description">
           <Switch checked={agentMode} onChange={(_, d) => onToggleAgent(d.checked)} label="Agent" />
         </Tooltip>
-        <Switch
-          checked={includeSelection}
-          onChange={(_, d) => onToggleSelection(d.checked)}
-          label={
-            <span>
-              Include selection{" "}
-              {includeSelection && selectedAddress && <span className="zee-chip zee-chip-inline">{selectedAddress}</span>}
-            </span>
-          }
-        />
+        <Switch checked={includeSelection} onChange={(_, d) => onToggleSelection(d.checked)} label="Selection" />
+        {includeSelection && selectedAddress && (
+          <ContextChip label={selectedAddress} ignored={ignoreSelection} onToggle={onIgnoreSelection} title="Sent with your next message" />
+        )}
+        <span className="zee-spacer" />
+        <UsageMeter today={today} prices={prices} />
       </div>
+      {!text.trim() && !busy && !files.length && <PromptChips prompts={prompts} onPick={setText} />}
       {(files.length > 0 || fileError) && (
         <div className="zee-attachments">
           {files.map((f, i) => (
@@ -134,41 +167,38 @@ export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, se
         </Tooltip>
         <Textarea
           className="zee-textarea"
+          ref={box}
           value={text}
           onChange={(_, d) => setText(d.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={agentMode ? "Tell Zee AI what to do in the workbook… (Enter to send)" : "Ask Zee AI… (Enter to send, Shift+Enter for a new line)"}
+          placeholder={agentMode ? "Tell Zee AI what to do in the workbook… (Enter to send, ↑ for earlier prompts)" : "Ask Zee AI… (Enter to send, ↑ for earlier prompts)"}
           resize="vertical"
           rows={2}
         />
-        <Menu positioning="above-end">
+        <Menu positioning="above-end" onOpenChange={(_, d) => d.open && setPrompts(loadPrompts())}>
           <MenuTrigger disableButtonEnhancement>
-            <Tooltip content="Saved prompts" relationship="label">
+            <Tooltip content="Favourite prompts" relationship="label">
               <Button appearance="subtle" icon={<Bookmark20Regular />} />
             </Tooltip>
           </MenuTrigger>
           <MenuPopover>
             <MenuList>
-              <MenuGroupHeader>Saved prompts – click to use</MenuGroupHeader>
-              {prompts.length === 0 && <MenuItem disabled>No saved prompts yet</MenuItem>}
+              <MenuGroupHeader>Favourite prompts – click to use</MenuGroupHeader>
+              {prompts.length === 0 && <MenuItem disabled>No favourites yet</MenuItem>}
               {prompts.map((p, i) => (
                 <MenuItem key={i} title={p} onClick={() => setText(p)}>
                   {short(p)}
                 </MenuItem>
               ))}
               <MenuDivider />
-              <MenuItem
-                icon={<BookmarkAdd20Regular />}
-                disabled={!text.trim() || prompts.includes(text.trim())}
-                onClick={() => updatePrompts([text.trim(), ...prompts])}
-              >
-                Save current text as a prompt
+              <MenuItem icon={<Star16Regular />} disabled={!text.trim() || prompts.includes(text.trim())} onClick={() => updatePrompts([text.trim(), ...prompts])}>
+                {text.trim() && prompts.includes(text.trim()) ? "Already a favourite" : "Add current text to favourites"}
               </MenuItem>
               {prompts.length > 0 && (
                 <Menu>
                   <MenuTrigger disableButtonEnhancement>
-                    <MenuItem icon={<Delete16Regular />}>Remove a prompt</MenuItem>
+                    <MenuItem icon={<Delete16Regular />}>Remove a favourite</MenuItem>
                   </MenuTrigger>
                   <MenuPopover>
                     <MenuList>
@@ -185,11 +215,11 @@ export function ChatInput({ busy, agentMode, onToggleAgent, includeSelection, se
           </MenuPopover>
         </Menu>
         {busy ? (
-          <Tooltip content="Stop generating" relationship="label">
+          <Tooltip content="Stop (Esc)" relationship="label">
             <Button appearance="secondary" icon={<Stop20Filled />} onClick={onStop} />
           </Tooltip>
         ) : (
-          <Tooltip content="Send" relationship="label">
+          <Tooltip content="Send (Enter)" relationship="label">
             <Button appearance="primary" icon={<Send20Filled />} onClick={submit} disabled={!text.trim() && !files.length} />
           </Tooltip>
         )}

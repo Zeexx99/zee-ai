@@ -13,6 +13,7 @@ import { cleanCell, findEmptyRows, looksLikeHeaderRow, markFilledColumns, runsDe
 import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
 import { chartTypeInfo, checkYCount, supportsLogScale, supportsSecondaryAxis } from "../utils/chartTypes";
+import { canRevertAlone } from "../utils/undoHistory";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -103,24 +104,29 @@ export type Snapshot =
   | { kind: "multi"; steps: Snapshot[]; label: string };
 
 const UNDO_LIMIT = 25;
-const undoStack: Snapshot[] = [];
+interface UndoEntry {
+  snap: Snapshot;
+  /** When the change was made (ms). */
+  at: number;
+}
+const undoStack: UndoEntry[] = [];
 const snapshotListeners = new Set<(label: string | null, depth: number) => void>();
 
 function notifyUndo() {
   const top = undoStack[undoStack.length - 1];
-  snapshotListeners.forEach((l) => l(top?.label ?? null, undoStack.length));
+  snapshotListeners.forEach((l) => l(top?.snap.label ?? null, undoStack.length));
 }
 
 /** @internal Shared with workbookOps.ts – push one undo step. */
 export function setSnapshot(s: Snapshot) {
-  undoStack.push(s);
+  undoStack.push({ snap: s, at: Date.now() });
   if (undoStack.length > UNDO_LIMIT) undoStack.shift();
   notifyUndo();
 }
 
 export function onUndoAvailabilityChange(listener: (label: string | null, depth: number) => void): () => void {
   snapshotListeners.add(listener);
-  listener(undoStack[undoStack.length - 1]?.label ?? null, undoStack.length);
+  listener(undoStack[undoStack.length - 1]?.snap.label ?? null, undoStack.length);
   return () => {
     snapshotListeners.delete(listener);
   };
@@ -238,7 +244,7 @@ export function prepareFormatSnapshot(r: Excel.Range, sheetName: string, label: 
 
 /** Undo the most recent Zee AI change (call repeatedly for multiple steps). */
 export async function undoLastChange(): Promise<string> {
-  const snap = undoStack[undoStack.length - 1];
+  const snap = undoStack[undoStack.length - 1]?.snap;
   if (!snap) throw new ExcelUserError("Nothing to undo.");
   try {
     await run((ctx) => applyUndo(ctx, snap));
@@ -255,6 +261,54 @@ export async function undoLastChange(): Promise<string> {
   undoStack.pop();
   notifyUndo();
   return snap.label;
+}
+
+/* ---------------------------------------------------------------- change history */
+
+export interface HistoryItem {
+  /** Position in the stack (0 = oldest). */
+  index: number;
+  label: string;
+  at: number;
+  /** Can be reverted without undoing newer changes (no newer change touches the same sheet). */
+  alone: boolean;
+}
+
+/** Zee AI's recent changes, newest first. */
+export function getChangeHistory(): HistoryItem[] {
+  const steps = undoStack.map((e) => e.snap);
+  return undoStack.map((e, index) => ({ index, label: e.snap.label, at: e.at, alone: canRevertAlone(steps, index) })).reverse();
+}
+
+/** Revert one change that no newer change depends on (see HistoryItem.alone). */
+export async function revertChange(index: number): Promise<string> {
+  const entry = undoStack[index];
+  if (!entry) throw new ExcelUserError("That change is no longer in the history.");
+  if (!canRevertAlone(undoStack.map((e) => e.snap), index))
+    throw new ExcelUserError(`Newer changes touch the same sheet – use “Undo back to here” for "${entry.snap.label}".`);
+  try {
+    await run((ctx) => applyUndo(ctx, entry.snap));
+  } catch (e) {
+    if (e instanceof ExcelUserError && /no longer exists/i.test(e.message)) {
+      undoStack.splice(undoStack.indexOf(entry), 1);
+      notifyUndo();
+      throw new ExcelUserError(`Couldn't revert "${entry.snap.label}": the sheet, chart or range no longer exists. It was removed from the history.`);
+    }
+    throw e;
+  }
+  undoStack.splice(undoStack.indexOf(entry), 1);
+  notifyUndo();
+  return entry.snap.label;
+}
+
+/** Undo every change from the newest back to (and including) `index`. Returns how many were undone. */
+export async function undoBackTo(index: number): Promise<number> {
+  let n = 0;
+  while (undoStack.length > index) {
+    await undoLastChange();
+    n++;
+  }
+  return n;
 }
 
 /* ---------------------------------------------------------------- reading */
@@ -436,6 +490,8 @@ export interface WriteOptions {
   /** Bold the first row (table header). */
   header?: boolean;
   label?: string;
+  /** Turn the written block into a formatted Excel table (filters, banded rows). Needs a header row. */
+  asTable?: boolean;
 }
 
 /** Write a 2D block (values and/or formulas) with its top-left corner at the active cell. */
@@ -452,18 +508,35 @@ export async function writeMatrixAtActiveCell(matrix: Cell[][], opts: WriteOptio
     if (cell.rowIndex + data.length > EXCEL_MAX_ROWS) throw new ExcelUserError("Not enough rows below the active cell.");
 
     const target = sheet.getRangeByIndexes(cell.rowIndex, cell.columnIndex, data.length, width);
-    target.load("address,formulas,numberFormat");
+    target.load("address,formulas,numberFormat,rowCount,columnCount");
     await ctx.sync();
     if (!opts.overwrite && hasContent(target.formulas)) throw new OverwriteRequiredError(target.address);
 
-    setSnapshot({
+    const label = opts.label ?? `insert at ${stripSheet(target.address)}`;
+    const cellsSnap: Snapshot = {
       kind: "cells",
       sheetName: sheet.name,
       address: target.address,
       formulas: target.formulas,
       numberFormat: target.numberFormat,
-      label: opts.label ?? `insert at ${stripSheet(target.address)}`,
-    });
+      label,
+    };
+    if (opts.asTable && data.length > 1) {
+      // Formatted Excel table: undo removes the table, restores the cells and their old formatting.
+      const formatSnap = prepareFormatSnapshot(target, sheet.name, label);
+      await ctx.sync();
+      const before = formatSnap?.();
+      target.formulas = data;
+      const table = sheet.tables.add(target.address, true);
+      table.style = "TableStyleMedium2";
+      table.load("name");
+      autofitAllOf(target);
+      target.select();
+      await ctx.sync();
+      setSnapshot({ kind: "multi", steps: [...(before ? [before] : []), cellsSnap, { kind: "addedTable", tableName: table.name, label }], label });
+      return target.address;
+    }
+    setSnapshot(cellsSnap);
     target.formulas = data;
     if (opts.header && data.length > 1) target.getRow(0).format.font.bold = true;
     autofitAllOf(target);
@@ -559,6 +632,19 @@ export interface CleanSummary {
   cellsChanged: number;
   cellsScanned: number;
   undoAvailable: boolean;
+  /** Dry run: a few example changes (address, before → after). */
+  samples?: Array<{ address: string; before: string; after: string }>;
+}
+
+/** Progress reporting + cancel for long scans. */
+export interface ProgressOptions {
+  /** fraction 0..1 and a short status text. */
+  onProgress?: (fraction: number, text: string) => void;
+  signal?: AbortSignal;
+}
+
+function checkCancelled(signal?: AbortSignal) {
+  if (signal?.aborted) throw new ExcelUserError("Cancelled – nothing was changed.");
 }
 
 const CLEAN_MAX_CELLS = 200_000;
@@ -566,7 +652,16 @@ const UNDO_MAX_CELLS = 50_000;
 /** Remove empty rows/columns scans in chunks, so it can handle much bigger sheets than Clean. */
 const REMOVE_EMPTY_MAX_CELLS = 10_000_000;
 
-export async function cleanSelection(options: CleanOptions): Promise<CleanSummary> {
+const shortCell = (v: unknown) => {
+  const t = v === null || v === undefined ? "" : String(v);
+  return t.length > 30 ? `${t.slice(0, 28)}…` : t;
+};
+
+/**
+ * Clean the selection. With `dryRun` nothing is written: the result tells how many cells would change
+ * and shows a few examples (used for the preview before cleaning).
+ */
+export async function cleanSelection(options: CleanOptions, opts: ProgressOptions & { dryRun?: boolean } = {}): Promise<CleanSummary> {
   return run(async (ctx) => {
     const c = await loadClippedSelection(ctx);
     if (c.isEmpty) throw new ExcelUserError("The selected cells are empty.");
@@ -574,14 +669,18 @@ export async function cleanSelection(options: CleanOptions): Promise<CleanSummar
     const total = b.rowCount * b.columnCount;
     if (total > CLEAN_MAX_CELLS) throw new ExcelUserError(`Select fewer than ${CLEAN_MAX_CELLS.toLocaleString()} cells to clean at once.`);
 
-    const keepUndo = total <= UNDO_MAX_CELLS;
+    const dry = !!opts.dryRun;
+    const keepUndo = !dry && total <= UNDO_MAX_CELLS;
     const allFormulas: unknown[][] = [];
     const allFormats: unknown[][] = [];
+    const samples: NonNullable<CleanSummary["samples"]> = [];
     const chunkRows = Math.max(1, Math.floor(20_000 / b.columnCount));
     let changed = 0;
 
     for (let start = 0; start < b.rowCount; start += chunkRows) {
+      checkCancelled(opts.signal);
       const rows = Math.min(chunkRows, b.rowCount - start);
+      opts.onProgress?.(start / b.rowCount, `${dry ? "Checking" : "Cleaning"} rows ${(start + 1).toLocaleString()}–${(start + rows).toLocaleString()} of ${b.rowCount.toLocaleString()}…`);
       const r = c.sheet.getRangeByIndexes(b.rowIndex + start, b.columnIndex, rows, b.columnCount);
       r.load("formulas,numberFormat");
       await ctx.sync();
@@ -597,17 +696,19 @@ export async function cleanSelection(options: CleanOptions): Promise<CleanSummar
           if (res.changed) {
             chunkChanged++;
             if (res.numberFormat) newFormats[i][j] = res.numberFormat;
+            if (dry && samples.length < 6) samples.push({ address: a1(b.rowIndex + start + i, b.columnIndex + j), before: shortCell(v), after: shortCell(res.value) });
           }
           return res.value;
         })
       );
-      if (chunkChanged > 0) {
+      if (chunkChanged > 0 && !dry) {
         r.numberFormat = newFormats;
         r.formulas = newFormulas;
-        changed += chunkChanged;
       }
+      changed += chunkChanged;
     }
-    if (changed > 0) {
+    opts.onProgress?.(1, dry ? "Preview ready" : "Done");
+    if (changed > 0 && !dry) {
       autofitAllOf(c.sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, 1, 1));
       await ctx.sync();
       if (keepUndo)
@@ -620,7 +721,7 @@ export async function cleanSelection(options: CleanOptions): Promise<CleanSummar
           label: `clean ${stripSheet(b.address)}`,
         });
     }
-    return { address: b.address, cellsChanged: changed, cellsScanned: total, undoAvailable: keepUndo && changed > 0 };
+    return { address: b.address, cellsChanged: changed, cellsScanned: total, undoAvailable: keepUndo && changed > 0, ...(dry ? { samples } : {}) };
   });
 }
 
@@ -633,11 +734,25 @@ export interface RemoveEmptySummary {
   undoAvailable: boolean;
 }
 
+/** Result of the scan: what "Remove empty rows / columns" would delete (shown as a preview first). */
+export interface EmptyLinesPlan {
+  kind: "rows" | "columns";
+  sheetName: string;
+  /** The sheet's used range when scanned (the apply step checks it didn't change). */
+  address: string;
+  block: Block;
+  /** 0-based offsets inside the block. */
+  hits: number[];
+  /** Rows / columns checked. */
+  scanned: number;
+  undo: { formulas: unknown[][]; numberFormat: unknown[][] } | null;
+}
+
 /**
- * Delete every row (or column) on the active sheet whose cells are all blank, 0 or a null word
- * (NULL, N/A, NaN…). Always scans the sheet's whole data area – no selection needed.
+ * Finds every row (or column) on the active sheet whose cells are all blank, 0 or a null word
+ * (NULL, N/A, NaN…). Always scans the sheet's whole data area – no selection needed. Nothing changes.
  */
-export async function removeEmptyLines(kind: "rows" | "columns"): Promise<RemoveEmptySummary> {
+export async function scanEmptyLines(kind: "rows" | "columns", opts: ProgressOptions = {}): Promise<EmptyLinesPlan> {
   return run(async (ctx) => {
     const sheet = ctx.workbook.worksheets.getActiveWorksheet();
     sheet.load("name");
@@ -658,7 +773,9 @@ export async function removeEmptyLines(kind: "rows" | "columns"): Promise<Remove
     const filled = Array<boolean>(b.columnCount).fill(false);
     const chunkRows = Math.max(1, Math.floor(20_000 / b.columnCount));
     for (let start = 0; start < b.rowCount; start += chunkRows) {
+      checkCancelled(opts.signal);
       const rows = Math.min(chunkRows, b.rowCount - start);
+      opts.onProgress?.(start / b.rowCount, `Scanning rows ${(start + 1).toLocaleString()}–${(start + rows).toLocaleString()} of ${b.rowCount.toLocaleString()}…`);
       const r = sheet.getRangeByIndexes(b.rowIndex + start, b.columnIndex, rows, b.columnCount);
       r.load(keepUndo ? "values,formulas,numberFormat" : "values");
       await ctx.sync();
@@ -673,18 +790,43 @@ export async function removeEmptyLines(kind: "rows" | "columns"): Promise<Remove
         markFilledColumns(r.values, filled, skipHeader);
       }
     }
-
-    const lines = kind === "rows" ? b.rowCount : b.columnCount;
+    opts.onProgress?.(1, "Scan complete");
     const hits = kind === "rows" ? emptyRows : filled.flatMap((f, j) => (f ? [] : [j]));
-    if (hits.length === 0) return { address: b.address, removed: 0, scanned: lines, undoAvailable: false };
+    return {
+      kind,
+      sheetName: sheet.name,
+      address: b.address,
+      block: b,
+      hits,
+      scanned: kind === "rows" ? b.rowCount : b.columnCount,
+      undo: keepUndo ? { formulas: undoFormulas, numberFormat: undoFormats } : null,
+    };
+  });
+}
+
+/** Deletes what scanEmptyLines found (after the user confirmed the preview). */
+export async function applyEmptyLines(plan: EmptyLinesPlan, opts: ProgressOptions = {}): Promise<RemoveEmptySummary> {
+  const { kind, block: b, hits } = plan;
+  if (!hits.length) return { address: plan.address, removed: 0, scanned: plan.scanned, undoAvailable: false };
+  return run(async (ctx) => {
+    const sheet = ctx.workbook.worksheets.getItemOrNullObject(plan.sheetName);
+    const used = sheet.getUsedRangeOrNullObject(true);
+    used.load("address");
+    await ctx.sync();
+    if (sheet.isNullObject || used.isNullObject || used.address !== plan.address)
+      throw new ExcelUserError("The sheet changed since the preview – run Remove empty rows / columns again.");
 
     // Delete bottom-up / right-to-left so earlier indexes stay valid; sync in batches.
     // The used range holds all the sheet's data, so whole rows/columns can go (much faster on big sheets).
+    const segs = runsDescending(hits);
     let queued = 0;
-    for (const seg of runsDescending(hits)) {
+    for (const seg of segs) {
       if (kind === "rows") sheet.getRangeByIndexes(b.rowIndex + seg.start, 0, seg.count, 1).getEntireRow().delete(Excel.DeleteShiftDirection.up);
       else sheet.getRangeByIndexes(0, b.columnIndex + seg.start, 1, seg.count).getEntireColumn().delete(Excel.DeleteShiftDirection.left);
-      if (++queued % 500 === 0) await ctx.sync();
+      if (++queued % 500 === 0) {
+        opts.onProgress?.(queued / segs.length, `Removing… ${queued.toLocaleString()} of ${segs.length.toLocaleString()} blocks`);
+        await ctx.sync();
+      }
     }
     await ctx.sync();
 
@@ -696,17 +838,22 @@ export async function removeEmptyLines(kind: "rows" | "columns"): Promise<Remove
       await ctx.sync();
     }
 
-    if (keepUndo)
+    if (plan.undo)
       setSnapshot({
         kind: "cells",
-        sheetName: sheet.name,
+        sheetName: plan.sheetName,
         address: b.address,
-        formulas: undoFormulas,
-        numberFormat: undoFormats,
+        formulas: plan.undo.formulas,
+        numberFormat: plan.undo.numberFormat,
         label: `remove empty ${kind} ${stripSheet(b.address)}`,
       });
-    return { address: b.address, removed: hits.length, scanned: lines, undoAvailable: keepUndo };
+    return { address: b.address, removed: hits.length, scanned: plan.scanned, undoAvailable: !!plan.undo };
   });
+}
+
+/** Scan + delete in one go (no preview). */
+export async function removeEmptyLines(kind: "rows" | "columns", opts: ProgressOptions = {}): Promise<RemoveEmptySummary> {
+  return applyEmptyLines(await scanEmptyLines(kind, opts), opts);
 }
 
 /* ---------------------------------------------------------------- split / extract */

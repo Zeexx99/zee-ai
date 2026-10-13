@@ -61,6 +61,9 @@ export interface ZeeSettings {
   webSearch: boolean;
   /** Let Gemini write and run Python for calculations in chat (code execution). */
   codeExecution: boolean;
+  /** Optional prices (USD per 1M tokens) for the usage meter's cost estimate. 0 = unknown. */
+  priceInPerM: number;
+  priceOutPerM: number;
 }
 
 export const DEFAULT_SETTINGS: ZeeSettings = {
@@ -83,9 +86,11 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   theme: "auto",
   webSearch: false,
   codeExecution: false,
+  priceInPerM: 0,
+  priceOutPerM: 0,
 };
 
-const STORAGE_KEY = "zeeai.settings.v1";
+export const STORAGE_KEY = "zeeai.settings.v1";
 
 export function loadSettings(): ZeeSettings {
   try {
@@ -94,6 +99,8 @@ export function loadSettings(): ZeeSettings {
     const parsed = JSON.parse(raw) as Partial<ZeeSettings>;
     const merged = { ...DEFAULT_SETTINGS, ...parsed };
     if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "auto";
+    if (!Number.isFinite(merged.priceInPerM) || merged.priceInPerM < 0) merged.priceInPerM = 0;
+    if (!Number.isFinite(merged.priceOutPerM) || merged.priceOutPerM < 0) merged.priceOutPerM = 0;
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };

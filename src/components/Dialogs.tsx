@@ -38,7 +38,7 @@ export function ConfirmDialog({ state, onResult }: { state: ConfirmState | null;
       <DialogSurface>
         <DialogBody>
           <DialogTitle>{state?.title}</DialogTitle>
-          <DialogContent>{state?.message}</DialogContent>
+          <DialogContent style={{ whiteSpace: "pre-line" }}>{state?.message}</DialogContent>
           <DialogActions>
             <Button appearance="secondary" onClick={() => onResult(false)}>
               Cancel

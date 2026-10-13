@@ -11,6 +11,9 @@ import {
   MessageBar,
   MessageBarActions,
   MessageBarBody,
+  MenuDivider,
+  MenuGroupHeader,
+  ProgressBar,
   Spinner,
   Toast,
   ToastBody,
@@ -21,10 +24,21 @@ import {
   useToastController,
   type ToastIntent,
 } from "@fluentui/react-components";
-import { Add20Regular, ArrowDownload20Regular, ArrowUndo20Regular, Copy20Regular, Settings20Regular, Table20Regular, WeatherMoon20Regular, WeatherSunny20Regular } from "@fluentui/react-icons";
+import {
+  Add20Regular,
+  ArrowDownload20Regular,
+  ArrowUndo16Regular,
+  ArrowUndo20Regular,
+  Copy20Regular,
+  History20Regular,
+  Settings20Regular,
+  Table20Regular,
+  WeatherMoon20Regular,
+  WeatherSunny20Regular,
+} from "@fluentui/react-icons";
 
 import { darkTheme, lightTheme, useAutoDark, useBodyThemeClass } from "./theme";
-import { useChat } from "./hooks/useChat";
+import { useChat, type ChatMessage } from "./hooks/useChat";
 import { ChatFeed } from "./components/ChatFeed";
 import { ChatInput } from "./components/ChatInput";
 import { QuickActions } from "./components/QuickActions";
@@ -47,6 +61,11 @@ import {
   type ExtractChoice,
 } from "./components/Dialogs";
 import { InsertActionsContext, copyText, type InsertActions } from "./components/insertActions";
+import { UpdateBanners, useUpdates } from "./qol/UpdateBanners";
+import { recordUsage, usageForDay } from "./qol/usageLog";
+import { buildDiagnostics } from "./qol/diagnostics";
+import { timeAgo } from "./utils/undoHistory";
+import { describeLines } from "./utils/clean";
 import { FunctionDialog, type ApplyWhere, type FunctionDialogState } from "./components/FunctionPicker";
 import { buildFormula, canApplyDirectly, guessHeader, inputCount, type FnSpec } from "./functions/catalog";
 
@@ -57,7 +76,12 @@ import {
   OverwriteRequiredError,
   cleanSelection,
   autofitAllColumns,
-  removeEmptyLines,
+  applyEmptyLines,
+  getChangeHistory,
+  revertChange,
+  scanEmptyLines,
+  undoBackTo,
+  type HistoryItem,
   createChart,
   getWorkbookOverview,
   insertConvertedColumns,
@@ -92,7 +116,7 @@ import { ESP_PROMPT, getSelectionHeaders, runDeclineByWell, runDeclineCurve, run
 import { UNIT_CONVERSIONS } from "./utils/petro";
 import { estimateTokens, generateJson, type Usage } from "./services/geminiService";
 import { explainFormulaPrompt, generateFormulaPrompt, transformPrompt, TRANSFORM_SYSTEM_PROMPT } from "./services/prompts";
-import { a1, a1Range, stripSheet } from "./utils/a1";
+import { a1, a1Range, columnLetter, stripSheet } from "./utils/a1";
 import { extractValue, EXTRACT_LABELS } from "./utils/extract";
 import type { CleanOptions } from "./utils/clean";
 import type { Cell } from "./utils/markdown";
@@ -141,13 +165,18 @@ export default function App() {
 
   /* ------------------------------------------------------------ usage */
   const [usage, setUsage] = useState<UsageTotals>({ requests: 0, promptTokens: 0, outputTokens: 0 });
-  const addUsage = useCallback(
-    (u: Usage) => setUsage((p) => ({ requests: p.requests + 1, promptTokens: p.promptTokens + u.promptTokens, outputTokens: p.outputTokens + u.outputTokens })),
-    []
-  );
+  const [today, setToday] = useState(() => usageForDay());
+  const addUsage = useCallback((u: Usage) => {
+    setUsage((p) => ({ requests: p.requests + 1, promptTokens: p.promptTokens + u.promptTokens, outputTokens: p.outputTokens + u.outputTokens }));
+    setToday(recordUsage(u));
+  }, []);
+  const prices = useMemo(() => ({ inPerM: settings.priceInPerM, outPerM: settings.priceOutPerM }), [settings.priceInPerM, settings.priceOutPerM]);
+  const updates = useUpdates();
 
   /* ------------------------------------------------------------ selection tracking */
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
+  /** × on the selection chip: leave the selection out of the next message (resets when the selection changes). */
+  const [ignoreSelection, setIgnoreSelection] = useState(false);
   useEffect(() => {
     if (!inExcel) return;
     let timer = 0;
@@ -155,7 +184,10 @@ export default function App() {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         getSelectedAddress()
-          .then((a) => setSelectedAddress(stripSheet(a)))
+          .then((a) => {
+            setSelectedAddress(a.replace(/^'(.*)'!/, "$1!"));
+            setIgnoreSelection(false);
+          })
           .catch(() => setSelectedAddress("multiple areas"));
       }, 150);
     };
@@ -187,12 +219,39 @@ export default function App() {
     }
   };
 
+  /* ------------------------------------------------------------ change history */
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const revertOne = async (h: HistoryItem) => {
+    try {
+      const label = await revertChange(h.index);
+      toast("success", "Reverted", label);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const undoTo = async (h: HistoryItem) => {
+    const count = undoDepth - h.index;
+    const ok = await askConfirm({
+      title: `Undo ${count} change${count === 1 ? "" : "s"}?`,
+      message: `This undoes everything from the newest change back to “${h.label}” (${timeAgo(h.at)}).`,
+      confirmLabel: "Undo",
+    });
+    if (!ok) return;
+    try {
+      const n = await undoBackTo(h.index);
+      toast("success", `Undid ${n} change${n === 1 ? "" : "s"}`, `Back to before “${h.label}”.`);
+    } catch (e) {
+      toastError(e);
+    }
+  };
+
   /* ------------------------------------------------------------ confirm (promise based) */
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const confirmResolver = useRef<((ok: boolean) => void) | null>(null);
   const askConfirm = useCallback(
     (state: ConfirmState) =>
       new Promise<boolean>((resolve) => {
+        confirmResolver.current?.(false);
         confirmResolver.current = resolve;
         setConfirmState(state);
       }),
@@ -215,7 +274,22 @@ export default function App() {
     [askConfirm]
   );
 
-  const { messages, busy, send, stop, clear, respondToApproval, continueAgent } = useChat({ getSettings, onUsage: addUsage, confirmLarge });
+  const { messages, busy, send, retry, stop, clear, respondToApproval, continueAgent } = useChat({ getSettings, onUsage: addUsage, confirmLarge });
+
+  // Esc stops a running answer from anywhere in the pane.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && busyRef.current) stop();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [stop]);
+
+  /** Edit & resend: put a prompt back into the chat box. */
+  const [inject, setInject] = useState<{ text: string; n: number } | null>(null);
+  const editPrompt = useCallback((text: string) => setInject({ text, n: Date.now() }), []);
 
   /** Run a write; if it would overwrite data, ask first and retry with overwrite=true. */
   const withOverwrite = useCallback(
@@ -274,12 +348,51 @@ export default function App() {
   const sendChat = useCallback(
     async (text: string, attachments?: Attachment[]) => {
       if (!ensureConfigured()) return;
-      const [[ctx, label], overview] = await Promise.all([selectionContext(), workbookContext()]);
+      const skip = ignoreSelection;
+      setIgnoreSelection(false);
+      const [[ctx, label], overview] = await Promise.all([skip ? Promise.resolve<[string, string | undefined]>(["", undefined]) : selectionContext(), workbookContext()]);
       const display = text || (attachments?.length ? "(see attached)" : "");
       const ask = text || "Extract the content of the attached file(s). Put tables in markdown tables so they can be inserted.";
       await send({ display, prompt: ask + ctx + overview, contextLabel: label, attachments });
     },
-    [ensureConfigured, selectionContext, send, workbookContext]
+    [ensureConfigured, ignoreSelection, selectionContext, send, workbookContext]
+  );
+
+  /** Regenerate / Retry. Attached files aren't kept in the history, so those prompts go back to the chat box instead. */
+  const retryAnswer = useCallback(
+    (id: string) => {
+      const i = messages.findIndex((m) => m.id === id);
+      const user = i > 0 ? messages[i - 1] : undefined;
+      if (user?.attachments?.length) {
+        editPrompt(user.text === "(see attached)" ? "" : user.text);
+        toast("info", "Attach the files again", "Files aren't kept after sending – attach them again and press Enter.");
+        return;
+      }
+      void retry(id);
+    },
+    [editPrompt, messages, retry, toast]
+  );
+
+  const copyDiagnostics = useCallback(
+    async (m: ChatMessage) => {
+      const s = settingsRef.current;
+      const report = buildDiagnostics({
+        error: m.text,
+        kind: m.errorKind,
+        model: m.model ?? s.model,
+        authMode: s.authMode,
+        extra: {
+          Mode: m.mode ?? (s.agentMode ? "agent" : "chat"),
+          "Web search / code execution": `${s.webSearch ? "on" : "off"} / ${s.codeExecution ? "on" : "off"}`,
+          "ExcelApi 1.12 / 1.17": inExcel
+            ? ["1.12", "1.17"].map((v) => (Office.context.requirements.isSetSupported("ExcelApi", v) ? "yes" : "no")).join(" / ")
+            : "not in Excel",
+        },
+      });
+      if (await copyText(report)) toast("success", "Diagnostics copied", "Paste them to Claude or IT. No keys or sheet data are included.");
+      else toast("error", "Couldn't copy", report.slice(0, 300));
+    },
+    [inExcel, toast]
   );
 
   /* ------------------------------------------------------------ insert actions for chat output */
@@ -293,18 +406,22 @@ export default function App() {
           toastError(e);
         }
       },
-      insertTable: async (matrix: Cell[][]) => {
+      insertTable: async (matrix: Cell[][], asTable?: boolean) => {
         try {
-          const addr = await withOverwrite((ow) => writeMatrixAtActiveCell(matrix, { overwrite: ow, header: true, label: "insert table" }));
-          if (addr) toast("success", "Table inserted", stripSheet(addr));
+          const addr = await withOverwrite((ow) => writeMatrixAtActiveCell(matrix, { overwrite: ow, header: true, asTable, label: asTable ? "insert Excel table" : "insert table" }));
+          if (addr) toast("success", asTable ? "Excel table inserted" : "Table inserted", `${stripSheet(addr)}${asTable ? " · filters and banded rows on (undo with ↶)" : ""}`);
         } catch (e) {
           toastError(e);
         }
       },
       respondToApproval,
       continueAgent,
+      retry: retryAnswer,
+      editPrompt,
+      copyDiagnostics,
+      busy,
     }),
-    [continueAgent, respondToApproval, toast, toastError, withOverwrite]
+    [busy, continueAgent, copyDiagnostics, editPrompt, respondToApproval, retryAnswer, toast, toastError, withOverwrite]
   );
 
   /* ------------------------------------------------------------ export chat */
@@ -350,7 +467,17 @@ export default function App() {
   const [unitOpen, setUnitOpen] = useState(false);
   const [dcaHeaders, setDcaHeaders] = useState<string[] | null>(null);
   const [plotSource, setPlotSource] = useState<PlotSource | null>(null);
-  const [job, setJob] = useState<{ text: string; abort?: AbortController } | null>(null);
+  const [job, setJob] = useState<{ text: string; abort?: AbortController; progress?: number } | null>(null);
+  /** Progress callback for long scans (updates the job banner, at most ~10× per second). */
+  const progressFor = (abort: AbortController) => {
+    let last = 0;
+    return (fraction: number, text: string) => {
+      const now = Date.now();
+      if (now - last < 100 && fraction < 1) return;
+      last = now;
+      setJob({ text, abort, progress: Math.max(0, Math.min(1, fraction)) });
+    };
+  };
 
   const onAggregate = async (fn: AggregateFn) => {
     try {
@@ -368,32 +495,73 @@ export default function App() {
 
   const onClean = async (o: CleanOptions) => {
     setCleanOpen(false);
-    setJob({ text: "Cleaning…" });
+    const abort = new AbortController();
+    const onProgress = progressFor(abort);
+    setJob({ text: "Checking what would change…", abort, progress: 0 });
     try {
-      const r = await cleanSelection(o);
+      // Preview first: count the changes and show a few examples before anything is written.
+      const preview = await cleanSelection(o, { dryRun: true, onProgress, signal: abort.signal });
+      if (!preview.cellsChanged) {
+        toast("info", "Already clean", `${stripSheet(preview.address)} · ${preview.cellsScanned.toLocaleString()} cells checked – nothing to change.`);
+        return;
+      }
+      setJob(null);
+      const examples = (preview.samples ?? []).map((x) => `${x.address}: “${x.before}” → “${x.after}”`).join("\n");
+      const ok = await askConfirm({
+        title: `Clean ${preview.cellsChanged.toLocaleString()} cell${preview.cellsChanged === 1 ? "" : "s"}?`,
+        message: `${stripSheet(preview.address)} · ${preview.cellsScanned.toLocaleString()} cells checked. For example:\n${examples}${preview.cellsScanned > 50_000 ? "\n\nThis range is too large for undo." : "\n\nYou can undo with ↶."}`,
+        confirmLabel: "Clean",
+      });
+      if (!ok) return;
+      // Writing can't be cancelled half-way (it would leave a partly cleaned range without undo).
+      setJob({ text: "Cleaning…", progress: 0 });
+      const r = await cleanSelection(o, { onProgress: (f, t) => setJob({ text: t, progress: f }) });
       toast(
         r.cellsChanged ? "success" : "info",
         r.cellsChanged ? `Cleaned ${r.cellsChanged.toLocaleString()} cells` : "Already clean",
         `${stripSheet(r.address)} · ${r.cellsScanned.toLocaleString()} cells scanned${r.cellsChanged && !r.undoAvailable ? " · undo not available for very large ranges" : ""}`
       );
     } catch (e) {
-      toastError(e);
+      if (abort.signal.aborted) toast("info", "Cancelled", "Nothing was changed.");
+      else toastError(e);
     } finally {
       setJob(null);
     }
   };
 
   const onRemoveEmpty = (kind: "rows" | "columns") => async () => {
-    setJob({ text: `Removing empty ${kind}…` });
+    const abort = new AbortController();
+    const onProgress = progressFor(abort);
+    setJob({ text: `Looking for empty ${kind}…`, abort, progress: 0 });
     try {
-      const r = await removeEmptyLines(kind);
+      // Scan first, show what would be deleted, delete only after the user confirms.
+      const plan = await scanEmptyLines(kind, { onProgress, signal: abort.signal });
+      setJob(null);
+      if (!plan.hits.length) {
+        toast("info", `No empty ${kind} found`, `${stripSheet(plan.address)} · ${plan.scanned.toLocaleString()} ${kind} checked.`);
+        return;
+      }
+      const b = plan.block;
+      const which = describeLines(plan.hits, kind === "rows" ? (i) => String(b.rowIndex + i + 1) : (i) => columnLetter(b.columnIndex + i));
+      const n = plan.hits.length;
+      const ok = await askConfirm({
+        title: `Remove ${n.toLocaleString()} empty ${n === 1 ? kind.slice(0, -1) : kind}?`,
+        message: `On “${plan.sheetName}” (${stripSheet(plan.address)}), ${kind === "rows" ? "rows" : "columns"} ${which} contain only blanks, zeros or N/A-type values and will be deleted.${
+          plan.undo ? " You can undo with ↶." : " This sheet is too large for undo – save a copy first if unsure."
+        }`,
+        confirmLabel: `Remove ${n.toLocaleString()}`,
+      });
+      if (!ok) return;
+      setJob({ text: `Removing ${n.toLocaleString()} empty ${kind}…`, progress: 0 });
+      const r = await applyEmptyLines(plan, { onProgress: (f, t) => setJob({ text: t, progress: f }) });
       toast(
         r.removed ? "success" : "info",
         r.removed ? `Removed ${r.removed.toLocaleString()} empty ${kind}` : `No empty ${kind} found`,
         `${stripSheet(r.address)} · ${r.scanned.toLocaleString()} ${kind} checked${r.removed && !r.undoAvailable ? " · undo not available for very large ranges" : ""}`
       );
     } catch (e) {
-      toastError(e);
+      if (abort.signal.aborted) toast("info", "Cancelled", "Nothing was changed.");
+      else toastError(e);
     } finally {
       setJob(null);
     }
@@ -755,6 +923,37 @@ export default function App() {
               {undoDepth > 1 ? undoDepth : undefined}
             </Button>
           </Tooltip>
+          <Menu onOpenChange={(_, d) => d.open && setHistory(getChangeHistory())}>
+            <MenuTrigger disableButtonEnhancement>
+              <Tooltip content="Change history – revert one of Zee AI's recent changes" relationship="label">
+                <Button appearance="subtle" size="small" icon={<History20Regular />} disabled={!undoDepth} />
+              </Tooltip>
+            </MenuTrigger>
+            <MenuPopover className="zee-history-popover">
+              <MenuList>
+                <MenuGroupHeader>Zee AI's recent changes (newest first)</MenuGroupHeader>
+                {history.map((h) => (
+                  <Menu key={`${h.index}-${h.at}`}>
+                    <MenuTrigger disableButtonEnhancement>
+                      <MenuItem secondaryContent={timeAgo(h.at)}>{h.label}</MenuItem>
+                    </MenuTrigger>
+                    <MenuPopover>
+                      <MenuList>
+                        <MenuItem icon={<ArrowUndo16Regular />} disabled={!h.alone} onClick={() => revertOne(h)}>
+                          {h.alone ? "Revert just this change" : "Revert just this (newer changes on the same sheet – use the option below)"}
+                        </MenuItem>
+                        <MenuItem onClick={() => undoTo(h)}>
+                          Undo back to here ({undoDepth - h.index} change{undoDepth - h.index === 1 ? "" : "s"})
+                        </MenuItem>
+                      </MenuList>
+                    </MenuPopover>
+                  </Menu>
+                ))}
+                <MenuDivider />
+                <MenuItem disabled>Only changes made in this session ({history.length} of max 25)</MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
           <Tooltip content={dark ? "Switch to light mode" : "Switch to dark mode"} relationship="label">
             <Button
               appearance="subtle"
@@ -788,6 +987,7 @@ export default function App() {
           </Tooltip>
         </header>
 
+        <UpdateBanners newerVersion={updates.newerVersion} notes={updates.notes} onDismissNotes={updates.dismissNotes} />
         {!inExcel && (
           <MessageBar intent="warning" className="zee-banner">
             <MessageBarBody>Preview mode – open Zee AI from Excel to read and write cells. Chat still works.</MessageBarBody>
@@ -828,9 +1028,10 @@ export default function App() {
         />
 
         {job && (
-          <MessageBar intent="info" className="zee-banner">
+          <MessageBar intent="info" className="zee-banner" layout={job.progress !== undefined ? "multiline" : "auto"}>
             <MessageBarBody>
               <Spinner size="extra-tiny" /> {job.text}
+              {job.progress !== undefined && <ProgressBar className="zee-job-progress" value={job.progress} max={1} thickness="large" />}
             </MessageBarBody>
             {job.abort && (
               <MessageBarActions>
@@ -851,11 +1052,28 @@ export default function App() {
           includeSelection={settings.includeSelection}
           selectedAddress={selectedAddress}
           onToggleSelection={(v) => updateSettings({ includeSelection: v })}
+          ignoreSelection={ignoreSelection}
+          onIgnoreSelection={setIgnoreSelection}
+          today={today}
+          prices={prices}
+          inject={inject}
           onSend={sendChat}
           onStop={stop}
         />
 
-        {settingsOpen && <SettingsDrawer open={settingsOpen} settings={settings} usage={usage} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />}
+        {settingsOpen && (
+          <SettingsDrawer
+            open={settingsOpen}
+            settings={settings}
+            usage={usage}
+            onChange={updateSettings}
+            onImport={(patch) => {
+              updateSettings({ ...patch, theme: ["auto", "light", "dark"].includes(String(patch.theme ?? settings.theme)) ? patch.theme ?? settings.theme : "auto" });
+              toast("success", "Settings imported", "Check Connection – the API key is only included when it was exported with it.");
+            }}
+            onClose={() => setSettingsOpen(false)}
+          />
+        )}
         <CleanDialog open={cleanOpen} onClose={() => setCleanOpen(false)} onRun={onClean} />
         <ExtractDialog open={extractOpen} onClose={() => setExtractOpen(false)} onRun={onExtract} />
         <GenerateFormulaDialog open={genOpen} onClose={() => setGenOpen(false)} onRun={onGenerateFormula} />
