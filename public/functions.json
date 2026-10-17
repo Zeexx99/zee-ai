@@ -647,6 +647,178 @@
           "dimensionality": "scalar"
         }
       ]
+    },
+    {
+      "id": "Z",
+      "name": "Z",
+      "description": "Gas compressibility factor Z (Hall–Yarborough; Sutton pseudo-criticals, Wichert–Aziz for CO2/H2S). =ZEE.Z(p, T, gas_SG, [CO2], [H2S])",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "p",
+          "description": "Pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "CO2",
+          "description": "CO2 mole fraction 0–1 (default 0)",
+          "type": "number",
+          "dimensionality": "scalar",
+          "optional": true
+        },
+        {
+          "name": "H2S",
+          "description": "H2S mole fraction 0–1 (default 0)",
+          "type": "number",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "BG",
+      "name": "BG",
+      "description": "Gas formation volume factor. =ZEE.BG(p, T, gas_SG, [\"ft3/scf\"|\"rb/scf\"|\"rb/Mscf\"])",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "p",
+          "description": "Pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "unit",
+          "description": "\"ft3/scf\" (default), \"rb/scf\" or \"rb/Mscf\"",
+          "type": "string",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "GAS_VISC",
+      "name": "GAS_VISC",
+      "description": "Gas viscosity in cp (Lee–Gonzalez–Eakin). =ZEE.GAS_VISC(p, T, gas_SG)",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "p",
+          "description": "Pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "T",
+          "description": "Temperature (°F)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "gas_SG",
+          "description": "Gas specific gravity (air = 1)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "DELIV",
+      "name": "DELIV",
+      "description": "Back-pressure deliverability fit q = C(Pr²−Pwf²)^n from multi-rate test points. Spills three cells: C, n, AOF.",
+      "result": {
+        "type": "number",
+        "dimensionality": "matrix"
+      },
+      "parameters": [
+        {
+          "name": "rates",
+          "description": "Test gas rates (range)",
+          "type": "any",
+          "dimensionality": "matrix"
+        },
+        {
+          "name": "pwfs",
+          "description": "Test flowing pressures, psia (range)",
+          "type": "any",
+          "dimensionality": "matrix"
+        },
+        {
+          "name": "Pr",
+          "description": "Reservoir pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "DELIV_Q",
+      "name": "DELIV_Q",
+      "description": "Gas rate from the back-pressure equation q = C(Pr²−Pwf²)^n.",
+      "result": {
+        "type": "number",
+        "dimensionality": "scalar"
+      },
+      "parameters": [
+        {
+          "name": "C",
+          "description": "C coefficient",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "n",
+          "description": "n exponent",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pr",
+          "description": "Reservoir pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "Pwf",
+          "description": "Flowing bottom-hole pressure (psia)",
+          "type": "number",
+          "dimensionality": "scalar"
+        }
+      ]
     }
   ]
 }

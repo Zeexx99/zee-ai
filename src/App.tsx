@@ -31,17 +31,23 @@ import {
   ArrowUndo20Regular,
   Copy20Regular,
   History20Regular,
+  MoreHorizontal20Regular,
+  Search20Regular,
   Settings20Regular,
   Table20Regular,
   WeatherMoon20Regular,
   WeatherSunny20Regular,
 } from "@fluentui/react-icons";
 
-import { darkTheme, lightTheme, useAutoDark, useBodyThemeClass } from "./theme";
+import { highContrastTheme, makeTheme, useAutoDark, useBodyThemeClass, useHighContrast } from "./theme";
 import { useChat, type ChatMessage } from "./hooks/useChat";
 import { ChatFeed } from "./components/ChatFeed";
 import { ChatInput } from "./components/ChatInput";
-import { QuickActions } from "./components/QuickActions";
+import { QuickActions, type QuickActionHandlers } from "./components/QuickActions";
+import { CommandPalette } from "./components/CommandPalette";
+import { toolCommands, togglePin, type Command } from "./components/commands";
+import { StatusStrip, type StatusItem } from "./components/StatusStrip";
+import { MAX_PINNED_TOOLS } from "./services/settingsService";
 // Imported eagerly (not lazy-loaded): a separate chunk breaks when Excel holds a cached page from an older deploy.
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import {
@@ -106,6 +112,30 @@ import { buildDiagnostics } from "./qol/diagnostics";
 import { timeAgo } from "./utils/undoHistory";
 import { describeLines } from "./utils/clean";
 import { FunctionDialog, type ApplyWhere, type FunctionDialogState } from "./components/FunctionPicker";
+import { NodalDialog } from "./components/NodalDialog";
+import { ImportDialog, MergeDialog, ResampleDialog, type ImportChoice, type ResampleTarget } from "./components/DataMenuDialogs";
+import { RecipeImportDialog, RecipeRunDialog, RecipeSaveDialog, RecipesMenu } from "./components/Recipes";
+import { listSheetTables, runImport, runMerge, runResample, type MergePick, type SheetInfo } from "./services/dataMenu";
+import { loadLastNodal, nodalSummary, runNodalSheet } from "./services/nodalActions";
+import {
+  loadRecipes,
+  newId,
+  newRecording,
+  recipeToText,
+  recordMerge,
+  recordStep,
+  saveRecipes,
+  type Recipe,
+  type RecipeStep,
+  type RecordState,
+  type StepAction,
+  describeStep,
+} from "./services/recipes";
+import { runRecipe } from "./services/recipeRunner";
+import { canUse } from "./qol/requirements";
+import type { NodalInput } from "./utils/nodal";
+import type { MergeOptions } from "./utils/merge";
+import type { ResampleOptions } from "./utils/resample";
 import { buildFormula, canApplyDirectly, guessHeader, inputCount, type FnSpec } from "./functions/catalog";
 
 import { isConfigured, loadSettings, modelLabel, saveSettings, type ZeeSettings } from "./services/settingsService";
@@ -148,6 +178,9 @@ import {
   readColumnSelection,
   undoLastChange,
   writeMatrixAtActiveCell,
+  getSelectionInfo,
+  sheetNames,
+  type SelectionInfoRaw,
   type AggregateFn,
   type ChartKind,
 } from "./services/excelService";
@@ -183,7 +216,9 @@ export default function App() {
   }, []);
   const autoDark = useAutoDark();
   const dark = settings.theme === "auto" ? autoDark : settings.theme === "dark";
-  useBodyThemeClass(dark);
+  const highContrast = useHighContrast();
+  useBodyThemeClass({ dark, accent: settings.accent, density: settings.density, highContrast });
+  const fluentTheme = useMemo(() => (highContrast ? highContrastTheme : makeTheme(dark, settings.accent)), [dark, settings.accent, highContrast]);
   const inExcel = useMemo(() => isExcelAvailable(), []);
 
   /* ------------------------------------------------------------ toasts */
@@ -196,11 +231,23 @@ export default function App() {
           <ToastTitle>{title}</ToastTitle>
           {body && <ToastBody>{body}</ToastBody>}
         </Toast>,
-        { intent, timeout: intent === "error" ? 8000 : 4000 }
+        { intent, timeout: intent === "error" ? 8000 : intent === "success" ? 2500 : 4000 }
       ),
     [dispatchToast]
   );
   const toastError = useCallback((e: unknown) => toast("error", "Something went wrong", (e as Error)?.message ?? String(e)), [toast]);
+
+  /* ------------------------------------------------------------ recipes: recording */
+  const [recording, setRecording] = useState<RecordState | null>(null);
+  const recRef = useRef<RecordState | null>(null);
+  recRef.current = recording;
+  /** Where the selection is right now – only looked up while recording. Call BEFORE an action that switches sheets. */
+  const recSel = useCallback(async (): Promise<SelectionInfoRaw | null> => (recRef.current ? getSelectionInfo().catch(() => null) : null), []);
+  /** Add a finished action to the recording (no-op when not recording). */
+  const record = useCallback((action: StepAction, sel: SelectionInfoRaw | null, output?: string) => {
+    if (!recRef.current) return;
+    setRecording((prev) => (prev ? recordStep(prev, action, sel, output) : prev));
+  }, []);
 
   /* ------------------------------------------------------------ usage */
   const [usage, setUsage] = useState<UsageTotals>({ requests: 0, promptTokens: 0, outputTokens: 0 });
@@ -326,6 +373,19 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [stop]);
 
+  // Ctrl+K (or Ctrl+/) opens the tool search from anywhere in the pane.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key.toLowerCase() === "k" || e.key === "/")) {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   /** Edit & resend: put a prompt back into the chat box. */
   const [inject, setInject] = useState<{ text: string; n: number } | null>(null);
   const editPrompt = useCallback((text: string) => setInject({ text, n: Date.now() }), []);
@@ -397,9 +457,11 @@ export default function App() {
       const [[ctx, label], overview] = await Promise.all([skip ? Promise.resolve<[string, string | undefined]>(["", undefined]) : selectionContext(), workbookContext()]);
       const display = text || (attachments?.length ? "(see attached)" : "");
       const ask = text || "Extract the content of the attached file(s). Put tables in markdown tables so they can be inserted.";
+      const sel = text && !attachments?.length ? await recSel() : null;
       await send({ display, prompt: ask + ctx + overview, contextLabel: label, attachments });
+      if (text && !attachments?.length) record({ kind: "prompt", text, agent: settingsRef.current.agentMode }, sel);
     },
-    [ensureConfigured, ignoreSelection, selectionContext, send, workbookContext]
+    [ensureConfigured, ignoreSelection, selectionContext, send, workbookContext, recSel, record]
   );
 
   /** Regenerate / Retry. Attached files aren't kept in the history, so those prompts go back to the chat box instead. */
@@ -527,8 +589,10 @@ export default function App() {
 
   const onAggregate = async (fn: AggregateFn) => {
     try {
+      const sel = await recSel();
       const res = await withOverwrite((ow) => insertAggregate(fn, ow));
       if (!res) return;
+      record({ kind: "aggregate", fn }, sel);
       const preview = res
         .slice(0, 3)
         .map((r) => `${r.address} = ${typeof r.value === "number" ? r.value.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(r.value)}`)
@@ -548,6 +612,7 @@ export default function App() {
       // Preview first: count the changes and show a few examples before anything is written.
       const preview = await cleanSelection(o, { dryRun: true, onProgress, signal: abort.signal });
       if (!preview.cellsChanged) {
+        record({ kind: "clean", options: o }, await recSel());
         toast("info", "Already clean", `${stripSheet(preview.address)} · ${preview.cellsScanned.toLocaleString()} cells checked – nothing to change.`);
         return;
       }
@@ -561,7 +626,9 @@ export default function App() {
       if (!ok) return;
       // Writing can't be cancelled half-way (it would leave a partly cleaned range without undo).
       setJob({ text: "Cleaning…", progress: 0 });
+      const sel = await recSel();
       const r = await cleanSelection(o, { onProgress: (f, t) => setJob({ text: t, progress: f }) });
+      record({ kind: "clean", options: o }, sel);
       toast(
         r.cellsChanged ? "success" : "info",
         r.cellsChanged ? `Cleaned ${r.cellsChanged.toLocaleString()} cells` : "Already clean",
@@ -584,6 +651,7 @@ export default function App() {
       const plan = await scanEmptyLines(kind, { onProgress, signal: abort.signal });
       setJob(null);
       if (!plan.hits.length) {
+        record({ kind: "removeEmpty", lines: kind }, await recSel());
         toast("info", `No empty ${kind} found`, `${stripSheet(plan.address)} · ${plan.scanned.toLocaleString()} ${kind} checked.`);
         return;
       }
@@ -599,7 +667,9 @@ export default function App() {
       });
       if (!ok) return;
       setJob({ text: `Removing ${n.toLocaleString()} empty ${kind}…`, progress: 0 });
+      const sel = await recSel();
       const r = await applyEmptyLines(plan, { onProgress: (f, t) => setJob({ text: t, progress: f }) });
+      record({ kind: "removeEmpty", lines: kind }, sel);
       toast(
         r.removed ? "success" : "info",
         r.removed ? `Removed ${r.removed.toLocaleString()} empty ${kind}` : `No empty ${kind} found`,
@@ -708,8 +778,10 @@ export default function App() {
   const onChart = async (kind: ChartKind, title: string) => {
     setChartOpen(false);
     try {
+      const sel = await recSel();
       const addr = await getSelectedAddress();
       const r = await createChart(addr, kind, title || undefined);
+      record({ kind: "chart", chartKind: kind, title }, sel);
       toast("success", "Chart created", r);
     } catch (e) {
       toastError(e);
@@ -778,7 +850,9 @@ export default function App() {
   const onProductionQc = async () => {
     setJob({ text: "Checking production data…" });
     try {
+      const sel = await recSel();
       const r = await runProductionQc();
+      record({ kind: "productionQc" }, sel, r.sheet);
       toast(r.issues ? "warning" : "success", r.issues ? `${r.issues} issues found` : "No issues found", `${r.columns} columns checked → sheet "${r.sheet}"`);
     } catch (e) {
       toastError(e);
@@ -792,7 +866,9 @@ export default function App() {
     const conv = UNIT_CONVERSIONS.find((u) => u.id === id);
     if (!conv) return;
     try {
+      const sel = await recSel();
       const r = await insertConvertedColumns(conv, header);
+      record({ kind: "units", id, header }, sel);
       toast("success", `Converted ${r.converted.toLocaleString()} values`, `${conv.label} → ${stripSheet(r.address)}`);
     } catch (e) {
       toastError(e);
@@ -862,7 +938,9 @@ export default function App() {
     if (!scan) return;
     setJob({ text: "Applying…" });
     try {
+      const sel = await recSel();
       const r = await applyDupes(scan, c);
+      record({ kind: "dupes", choice: c }, sel);
       const parts = [r.highlighted ? `${r.highlighted} highlighted` : "", r.unified ? `${r.unified} spellings unified` : "", r.deleted ? `${r.deleted} duplicate rows deleted` : ""].filter(Boolean);
       toast("success", parts.join(" · ") || "Done", r.undoable ? "Undo with ↶ or the history list." : "Too large to undo – keep a copy if unsure.");
     } catch (e) {
@@ -888,7 +966,9 @@ export default function App() {
     if (!sel) return;
     setJob({ text: "Filling gaps…" });
     try {
+      const where = await recSel();
       const { sheet, result } = await runGapFill(sel, o);
+      record({ kind: "fillGaps", dateHeader: sel.headers[o.dateCol], groupHeader: o.groupCol !== undefined ? sel.headers[o.groupCol] : undefined, method: o.method, maxGapSteps: o.maxGapSteps }, where, sheet);
       const st = result.stats;
       const step = st.step.kind === "month" ? "monthly" : st.step.days === 1 ? "daily" : `every ${st.step.days} days`;
       toast(
@@ -910,7 +990,9 @@ export default function App() {
       const p = await previewImportFix(sel);
       setJob(null);
       const headerChanges = p.plans.filter((x) => x.newHeader);
+      const where = await recSel();
       if (!p.changes && !headerChanges.length) {
+        record({ kind: "fixImport" }, where);
         toast("success", "Nothing to fix", `${sel.block.address} already has proper numbers and dates.`);
         return;
       }
@@ -928,6 +1010,7 @@ export default function App() {
       if (!ok) return;
       setJob({ text: "Fixing…" });
       const r = await applyImportFix(p);
+      record({ kind: "fixImport" }, where);
       toast("success", `${r.changed.toLocaleString()} cells fixed${r.headers ? `, ${r.headers} headers` : ""}`, r.undoable ? "Undo with ↶ or the history list." : "Too large to undo – keep a copy if unsure.");
     } catch (e) {
       toastError(e);
@@ -1061,7 +1144,9 @@ export default function App() {
     const abort = new AbortController();
     setJob({ text: "Auditing formulas…", abort, progress: 0 });
     try {
+      const where = await recSel();
       const r = await runFormulaAudit({ onProgress: progressFor(abort), signal: abort.signal });
+      record({ kind: "formulaAudit" }, where, r.sheet);
       setJob(null);
       const parts = Object.entries(r.counts).map(([k, n]) => `${n} ${AUDIT_LABELS[k as keyof typeof AUDIT_LABELS].toLowerCase()}`);
       toast(r.issues.length ? "warning" : "success", r.issues.length ? `${r.issues.length} findings in ${r.formulaCells.toLocaleString()} formulas` : `All ${r.formulaCells.toLocaleString()} formulas look fine`, `${parts.join(" · ") || "No problems"} → sheet "${r.sheet}"`);
@@ -1237,21 +1322,298 @@ export default function App() {
     }
   };
 
-  const simple = (fn: () => Promise<string>, title: string) => async () => {
+  /* ------------------------------------------------------------ nodal analysis */
+  const [nodalOpen, setNodalOpen] = useState(false);
+  const [nodalLast, setNodalLast] = useState<NodalInput | null>(null);
+  const openNodal = () => {
+    setNodalLast(loadLastNodal());
+    setNodalOpen(true);
+  };
+  const onNodal = async (input: NodalInput) => {
+    setNodalOpen(false);
+    setJob({ text: "Running nodal analysis (IPR × tubing curve)…" });
     try {
+      await new Promise((r) => setTimeout(r, 30)); // let the banner paint before the calculation
+      const r = await runNodalSheet(input);
+      record({ kind: "nodal", input }, null, r.sheet);
+      const base = r.result.cases[0];
+      toast(
+        base.op ? (base.op.stable ? "success" : "warning") : "warning",
+        base.op ? `Operating point: ${Math.round(base.op.q).toLocaleString()} STB/d at ${Math.round(base.op.pwf).toLocaleString()} psia` : "No natural-flow operating point",
+        `${nodalSummary(r.result)} → sheet "${r.sheet}"`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  /* ------------------------------------------------------------ data menu: import, merge, resample */
+  const [importOpen, setImportOpen] = useState(false);
+  const onImportFile = async (c: ImportChoice) => {
+    setImportOpen(false);
+    const text = `Importing ${c.fileName}…`;
+    setJob({ text, progress: 0 });
+    try {
+      const r = await runImport(c.fileName, c.parsed, c.target, (f) => setJob({ text, progress: f }));
+      toast(
+        "success",
+        `Imported ${c.parsed.rows.length.toLocaleString()} rows × ${c.parsed.headers.length} columns`,
+        c.target === "newSheet" ? `→ sheet "${r.sheet}"` : `→ ${stripSheet(r.address)} (undo with ↶)`
+      );
+      if (recRef.current) toast("info", "Import isn't a recipe step", "A file can't be picked automatically – import next month's file first, then run the recipe on it.");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const [mergeSheets, setMergeSheets] = useState<SheetInfo[] | null>(null);
+  const openMerge = async () => {
+    setJob({ text: "Reading the sheets' headers…" });
+    try {
+      const list = await listSheetTables();
+      if (list.length < 2) toast("info", "Need at least two sheets with data", "Put each table (production, well tests, ESP readings…) on its own sheet with a header row.");
+      else setMergeSheets(list);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const onMerge = async (picks: MergePick[], o: MergeOptions) => {
+    const infos = mergeSheets ?? [];
+    setMergeSheets(null);
+    setJob({ text: "Merging…", progress: 0 });
+    try {
+      const r = await runMerge(picks, o, (f) => setJob({ text: "Merging…", progress: f }));
+      const st = r.result.stats;
+      if (recRef.current) {
+        const named = picks.map((p) => {
+          const h = infos.find((x) => x.name === p.sheet)?.headers ?? [];
+          return { sheet: p.sheet, wellHeader: h[p.wellCol] ?? "", dateHeader: p.dateCol >= 0 ? h[p.dateCol] : undefined };
+        });
+        setRecording((prev) => (prev ? recordMerge(prev, named, { how: o.how, dateMatch: o.dateMatch, maxAgeDays: o.maxAgeDays ?? 0 }, r.sheet) : prev));
+      }
+      const notes = st.perTable
+        .filter((t, i) => i > 0 || t.duplicateKeys || t.badKeys)
+        .map((t) => `${t.name}: ${t.matched.toLocaleString()} matched${t.duplicateKeys ? `, ${t.duplicateKeys} duplicate well/date rows skipped` : ""}${t.badKeys ? `, ${t.badKeys} rows without well/date` : ""}`);
+      toast("success", `${st.outputRows.toLocaleString()} rows · ${st.wells} wells`, `${notes.join(" · ")} → sheet "${r.sheet}"`);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  const [resampleTarget, setResampleTarget] = useState<ResampleTarget | null>(null);
+  const openResample = async () => {
+    try {
+      const sel = await readHeaderedSelection("time series (a Date column, optionally Well, and values)");
+      toolSel.current = sel;
+      setResampleTarget({ headers: sel.headers, sample: sel.rows.slice(0, 500) });
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const onResample = async (o: ResampleOptions) => {
+    setResampleTarget(null);
+    const sel = toolSel.current;
+    if (!sel) return;
+    setJob({ text: "Resampling…", progress: 0 });
+    try {
+      const where = await recSel();
+      const { sheet, result } = await runResample(sel, o, (f) => setJob({ text: "Writing…", progress: f }));
+      const byHeader = Object.fromEntries(Object.entries(o.aggs).map(([j, a]) => [sel.headers[Number(j)], a]));
+      record(
+        { kind: "resample", dateHeader: sel.headers[o.dateCol], groupHeader: o.groupCol !== undefined ? sel.headers[o.groupCol] : undefined, period: o.period, aggs: byHeader, fill: o.fill, countDays: o.countDays },
+        where,
+        sheet
+      );
+      const st = result.stats;
+      toast(
+        "success",
+        `${st.inputRows.toLocaleString()} rows → ${st.outputRows.toLocaleString()} ${o.period === "day" ? "days" : `${o.period}s`}`,
+        `${st.groups > 1 ? `${st.groups} wells · ` : ""}${st.addedPeriods ? `${st.addedPeriods} missing periods added (blue) · ` : ""}${st.skippedRows ? `${st.skippedRows} rows without a date skipped · ` : ""}→ sheet "${sheet}"`
+      );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+
+  /* ------------------------------------------------------------ recipes: save, run, share */
+  const [recipes, setRecipes] = useState<Recipe[]>(() => loadRecipes());
+  const persistRecipes = (list: Recipe[]) => {
+    setRecipes(list);
+    if (!saveRecipes(list)) toast("warning", "Recipe kept for this session only", "Excel blocked saving it – use Share to keep a copy as text.");
+  };
+  const [saveSteps, setSaveSteps] = useState<RecipeStep[] | null>(null);
+  const startRecording = () => {
+    setRecording(newRecording());
+    toast("info", "Recording", "Use Zee AI as usual – each action you finish becomes a step. Recipes → Stop & save when done.");
+  };
+  const stopRecording = () => {
+    const r = recRef.current;
+    setRecording(null);
+    if (r?.steps.length) setSaveSteps(r.steps);
+  };
+  const lastPrompt = useMemo(() => {
+    const m = [...messages].reverse().find((x) => x.role === "user" && x.text && x.text !== "(see attached)" && !x.attachments?.length);
+    return m ? { text: m.text, agent: m.mode === "agent" } : null;
+  }, [messages]);
+  const [runTarget, setRunTarget] = useState<{ recipe: Recipe; sheets: string[]; active: string } | null>(null);
+  const openRunRecipe = async (recipe: Recipe) => {
+    try {
+      const { names, active } = await sheetNames();
+      setRunTarget({ recipe, sheets: names, active });
+    } catch (e) {
+      toastError(e);
+    }
+  };
+  const doRunRecipe = async (recipe: Recipe, dataSheet: string) => {
+    setRunTarget(null);
+    const abort = new AbortController();
+    try {
+      const report = await runRecipe(recipe, dataSheet, {
+        signal: abort.signal,
+        onStep: (k, n, label) => setJob({ text: `${recipe.name} – step ${k + 1} of ${n}: ${label}`, abort, progress: k / n }),
+        sendPrompt: async (text, agent) => {
+          if (!ensureConfigured()) throw new Error("Connect Gemini first (Settings).");
+          const [[ctx, label], overview] = await Promise.all([selectionContext(), workbookContext()]);
+          await send({ display: text, prompt: text + ctx + overview, contextLabel: label, ...(agent ? { forceAgent: true } : { forceChat: true }) });
+        },
+      });
+      if (report.failed) toast("error", `Stopped at step ${report.failed.index + 1}: ${report.failed.label}`, `${report.failed.error}${report.done ? ` (${report.done} step${report.done === 1 ? "" : "s"} done – undo them from the history list if needed)` : ""}`);
+      else if (report.cancelled) toast("info", "Recipe cancelled", `${report.done} of ${report.total} steps done.`);
+      else toast("success", `“${recipe.name}” done – ${report.done} steps`, report.outputs.length ? `New sheets: ${report.outputs.join(", ")}` : "Undo any step from the history list.");
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setJob(null);
+    }
+  };
+  const [recipeImportOpen, setRecipeImportOpen] = useState(false);
+  const recipesMenu = (
+    <RecipesMenu
+      recipes={recipes}
+      recording={recording}
+      disabled={busy || !!job || !inExcel}
+      canSaveLastPrompt={!!lastPrompt}
+      onStart={startRecording}
+      onStop={stopRecording}
+      onCancel={() => {
+        setRecording(null);
+        toast("info", "Recording discarded");
+      }}
+      onRun={openRunRecipe}
+      onDelete={async (r) => {
+        const ok = await askConfirm({ title: `Delete recipe “${r.name}”?`, message: "This only removes the recipe, not any sheets it created.", confirmLabel: "Delete" });
+        if (ok) persistRecipes(recipes.filter((x) => x.id !== r.id));
+      }}
+      onShare={async (r) => {
+        if (await copyText(recipeToText(r))) toast("success", "Recipe copied", "Paste it to a colleague – they add it with Recipes → Add a recipe someone shared.");
+        else toast("error", "Couldn't copy", "The clipboard is blocked here.");
+      }}
+      onImport={() => setRecipeImportOpen(true)}
+      onSaveLastPrompt={() => lastPrompt && setSaveSteps([{ kind: "prompt", text: lastPrompt.text, agent: lastPrompt.agent }])}
+    />
+  );
+
+  const simple = (fn: () => Promise<string>, title: string, step?: StepAction) => async () => {
+    try {
+      const sel = step ? await recSel() : null;
       const r = await fn();
+      if (step) record(step, sel);
       toast("success", title, stripSheet(r));
     } catch (e) {
       toastError(e);
     }
   };
 
+  /* ------------------------------------------------------------ toolbar tools, Ctrl+K search, pins */
+  const toolHandlers: QuickActionHandlers = {
+    onAggregate,
+    onClean: () => setCleanOpen(true),
+    onExtract: () => setExtractOpen(true),
+    onFormatTable: simple(formatSelectionAsTable, "Formatted as table", { kind: "formatTable" }),
+    onAutofit: simple(autofitAllColumns, "All columns auto-fitted", { kind: "autofit" }),
+    onRemoveEmptyRows: onRemoveEmpty("rows"),
+    onRemoveEmptyColumns: onRemoveEmpty("columns"),
+    onExplainFormula,
+    onGenerateFormula: () => setGenOpen(true),
+    onAnalyze,
+    onChart: () => setChartOpen(true),
+    onDeclineCurve: openDeclineCurve,
+    onProductionQc,
+    onUnits: () => setUnitOpen(true),
+    onEspCheck,
+    onEspAnalysis: openEspAnalysis,
+    onDraw: openDraw,
+    onPickFunction,
+    onFreeze,
+    onDailyReport: openDailyReport,
+    onEspLogTemplate,
+    onEspLogAnalyze: openEspLog,
+    onFormulaAudit,
+    onSuggestRules,
+    onFindDupes: openFindDupes,
+    onFillGaps: openFillGaps,
+    onFixImport,
+    onExplainSheet,
+    onSheetGuide,
+    onNamedInputs: () => openNamedInputs(),
+    onImportFile: () => setImportOpen(true),
+    onMerge: openMerge,
+    onResample: openResample,
+    onNodal: openNodal,
+  };
+  const toolsBusy = busy || !!job;
+  const tools = toolCommands(toolHandlers);
+  const appCommands: Command[] = [
+    { id: "app.newChat", label: "New chat", group: "Zee AI", keywords: "clear reset", run: clear },
+    { id: "app.settings", label: "Open Settings", group: "Zee AI", keywords: "api key model preferences", run: () => setSettingsOpen(true) },
+    { id: "app.theme", label: dark ? "Switch to light mode" : "Switch to dark mode", group: "Zee AI", keywords: "theme dark light appearance", run: () => updateSettings({ theme: dark ? "light" : "dark" }) },
+    { id: "app.undo", label: undoLabel ? `Undo: ${undoLabel}` : "Undo (nothing to undo)", group: "Zee AI", keywords: "revert back", run: () => undoLabel && undo() },
+    { id: "app.exportCopy", label: "Copy chat as text", group: "Zee AI", keywords: "export", run: exportCopy },
+  ];
+  // While a job or an answer runs, tools stay listed but don't start (same as the greyed-out toolbar).
+  const guard = (c: Command): Command => (c.group === "Zee AI" ? c : { ...c, run: () => (toolsBusy ? toast("info", "Busy", "Wait for the current task to finish (or press Esc).") : c.run()) });
+  const allCommands = [...tools, ...appCommands].map(guard);
+  const pinnedCommands = settings.pinnedTools.map((id) => tools.find((c) => c.id === id)).filter((c): c is Command => !!c);
+  const onTogglePin = (id: string) => updateSettings({ pinnedTools: togglePin(settings.pinnedTools, id, MAX_PINNED_TOOLS) });
+
+  const statusItems: StatusItem[] = [];
+  if (!offline.online)
+    statusItems.push({
+      key: "offline",
+      intent: "warning",
+      body: `You're offline. ${offline.queued ? `${offline.queued} request${offline.queued === 1 ? "" : "s"} will be sent` : "Requests that fail are sent"} again automatically when the connection is back.`,
+    });
+  if (!inExcel) statusItems.push({ key: "preview", intent: "warning", body: "Preview mode – open Zee AI from Excel to read and write cells. Chat still works." });
+  if (inExcel && !isConfigured(settings))
+    statusItems.push({
+      key: "setup",
+      intent: "info",
+      body: "Connect a Gemini API key or Google account to start.",
+      actions: (
+        <Button size="small" onClick={() => setSettingsOpen(true)}>
+          Set up
+        </Button>
+      ),
+    });
+  if (inExcel && !canUse("core"))
+    statusItems.push({ key: "old-excel", intent: "warning", body: "This Excel is older than Zee AI needs (ExcelApi 1.7) – most sheet tools won't work. Chat still works. Settings → This Excel shows what's available." });
+
   /* ------------------------------------------------------------ render */
   return (
     // Note: layout classes live on an inner div, NOT on FluentProvider. Fluent copies the provider's
     // className onto its portal containers (toasts, dialogs); a full-height white class there
     // covered the whole pane with an empty white layer.
-    <FluentProvider theme={dark ? darkTheme : lightTheme} style={{ height: "100%" }}>
+    <FluentProvider theme={fluentTheme} style={{ height: "100%" }}>
       <div className={`zee-app ${dark ? "zee-dark" : "zee-light"}`}>
       <InsertActionsContext.Provider value={insertActions}>
         <header className="zee-header">
@@ -1276,128 +1638,101 @@ export default function App() {
               {undoDepth > 1 ? undoDepth : undefined}
             </Button>
           </Tooltip>
-          <Menu onOpenChange={(_, d) => d.open && setHistory(getChangeHistory())}>
-            <MenuTrigger disableButtonEnhancement>
-              <Tooltip content="Change history – revert one of Zee AI's recent changes" relationship="label">
-                <Button appearance="subtle" size="small" icon={<History20Regular />} disabled={!undoDepth} />
-              </Tooltip>
-            </MenuTrigger>
-            <MenuPopover className="zee-history-popover">
-              <MenuList>
-                <MenuGroupHeader>Zee AI's recent changes (newest first)</MenuGroupHeader>
-                {history.map((h) => (
-                  <Menu key={`${h.index}-${h.at}`}>
-                    <MenuTrigger disableButtonEnhancement>
-                      <MenuItem secondaryContent={timeAgo(h.at)}>{h.label}</MenuItem>
-                    </MenuTrigger>
-                    <MenuPopover>
-                      <MenuList>
-                        <MenuItem icon={<ArrowUndo16Regular />} disabled={!h.alone} onClick={() => revertOne(h)}>
-                          {h.alone ? "Revert just this change" : "Revert just this (newer changes on the same sheet – use the option below)"}
-                        </MenuItem>
-                        <MenuItem onClick={() => undoTo(h)}>
-                          Undo back to here ({undoDepth - h.index} change{undoDepth - h.index === 1 ? "" : "s"})
-                        </MenuItem>
-                      </MenuList>
-                    </MenuPopover>
-                  </Menu>
-                ))}
-                <MenuDivider />
-                <MenuItem disabled>Only changes made in this session ({history.length} of max 25)</MenuItem>
-              </MenuList>
-            </MenuPopover>
-          </Menu>
-          <Tooltip content={dark ? "Switch to light mode" : "Switch to dark mode"} relationship="label">
-            <Button
-              appearance="subtle"
-              size="small"
-              icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
-              onClick={() => updateSettings({ theme: dark ? "light" : "dark" })}
-            />
-          </Tooltip>
-          <Menu>
-            <MenuTrigger disableButtonEnhancement>
-              <Tooltip content="Export chat" relationship="label">
-                <Button appearance="subtle" size="small" icon={<ArrowDownload20Regular />} disabled={!messages.length} />
-              </Tooltip>
-            </MenuTrigger>
-            <MenuPopover>
-              <MenuList>
-                <MenuItem icon={<Copy20Regular />} onClick={exportCopy}>
-                  Copy chat as text
-                </MenuItem>
-                <MenuItem icon={<Table20Regular />} onClick={exportSheet} disabled={!inExcel}>
-                  Export chat to a new sheet
-                </MenuItem>
-              </MenuList>
-            </MenuPopover>
-          </Menu>
           <Tooltip content="New chat" relationship="label">
             <Button appearance="subtle" size="small" icon={<Add20Regular />} onClick={clear} disabled={!messages.length} />
           </Tooltip>
           <Tooltip content="Settings" relationship="label">
             <Button appearance="subtle" size="small" icon={<Settings20Regular />} onClick={() => setSettingsOpen(true)} />
           </Tooltip>
+          <Menu onOpenChange={(_, d) => d.open && setHistory(getChangeHistory())}>
+            <MenuTrigger disableButtonEnhancement>
+              <Tooltip content="More" relationship="label">
+                <Button appearance="subtle" size="small" icon={<MoreHorizontal20Regular />} aria-label="More" />
+              </Tooltip>
+            </MenuTrigger>
+            <MenuPopover>
+              <MenuList>
+                <MenuItem icon={<Search20Regular />} secondaryContent="Ctrl+K" onClick={() => setPaletteOpen(true)}>
+                  Search tools
+                </MenuItem>
+                <MenuItem icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} onClick={() => updateSettings({ theme: dark ? "light" : "dark" })}>
+                  {dark ? "Light mode" : "Dark mode"}
+                </MenuItem>
+                <MenuDivider />
+                <Menu>
+                  <MenuTrigger disableButtonEnhancement>
+                    <MenuItem icon={<History20Regular />} disabled={!undoDepth}>
+                      Change history{undoDepth ? ` (${undoDepth})` : ""}
+                    </MenuItem>
+                  </MenuTrigger>
+                  <MenuPopover className="zee-history-popover">
+                    <MenuList>
+                      <MenuGroupHeader>Zee AI's recent changes (newest first)</MenuGroupHeader>
+                      {history.map((h) => (
+                        <Menu key={`${h.index}-${h.at}`}>
+                          <MenuTrigger disableButtonEnhancement>
+                            <MenuItem secondaryContent={timeAgo(h.at)}>{h.label}</MenuItem>
+                          </MenuTrigger>
+                          <MenuPopover>
+                            <MenuList>
+                              <MenuItem icon={<ArrowUndo16Regular />} disabled={!h.alone} onClick={() => revertOne(h)}>
+                                {h.alone ? "Revert just this change" : "Revert just this (newer changes on the same sheet – use the option below)"}
+                              </MenuItem>
+                              <MenuItem onClick={() => undoTo(h)}>
+                                Undo back to here ({undoDepth - h.index} change{undoDepth - h.index === 1 ? "" : "s"})
+                              </MenuItem>
+                            </MenuList>
+                          </MenuPopover>
+                        </Menu>
+                      ))}
+                      <MenuDivider />
+                      <MenuItem disabled>Only changes made in this session ({history.length} of max 25)</MenuItem>
+                    </MenuList>
+                  </MenuPopover>
+                </Menu>
+                <Menu>
+                  <MenuTrigger disableButtonEnhancement>
+                    <MenuItem icon={<ArrowDownload20Regular />} disabled={!messages.length}>
+                      Export chat
+                    </MenuItem>
+                  </MenuTrigger>
+                  <MenuPopover>
+                    <MenuList>
+                      <MenuItem icon={<Copy20Regular />} onClick={exportCopy}>
+                        Copy chat as text
+                      </MenuItem>
+                      <MenuItem icon={<Table20Regular />} onClick={exportSheet} disabled={!inExcel}>
+                        Export chat to a new sheet
+                      </MenuItem>
+                    </MenuList>
+                  </MenuPopover>
+                </Menu>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
         </header>
 
         <UpdateBanners newerVersion={updates.newerVersion} notes={updates.notes} onDismissNotes={updates.dismissNotes} />
-        {!offline.online && (
+        <StatusStrip items={statusItems} />
+
+        <QuickActions {...toolHandlers} disabled={busy || !!job} pinned={pinnedCommands} onSearch={() => setPaletteOpen(true)} can={canUse} recipes={recipesMenu} />
+
+        {recording && (
           <MessageBar intent="warning" className="zee-banner">
             <MessageBarBody>
-              You're offline. {offline.queued ? `${offline.queued} request${offline.queued === 1 ? "" : "s"} will be sent` : "Requests that fail are sent"} again automatically when the connection is back.
+              <span className="zee-recording">●</span> Recording a recipe – {recording.steps.length} step{recording.steps.length === 1 ? "" : "s"} so far
+              {recording.steps.length ? `: ${recording.steps.slice(-3).map(describeStep).join(" → ")}` : ". Use Zee AI as usual."}
             </MessageBarBody>
-          </MessageBar>
-        )}
-
-        {!inExcel && (
-          <MessageBar intent="warning" className="zee-banner">
-            <MessageBarBody>Preview mode – open Zee AI from Excel to read and write cells. Chat still works.</MessageBarBody>
-          </MessageBar>
-        )}
-        {inExcel && !isConfigured(settings) && (
-          <MessageBar intent="info" className="zee-banner">
-            <MessageBarBody>Connect a Gemini API key or Google account to start.</MessageBarBody>
             <MessageBarActions>
-              <Button size="small" onClick={() => setSettingsOpen(true)}>
-                Set up
+              <Button size="small" appearance="primary" disabled={!recording.steps.length} onClick={stopRecording}>
+                Stop & save
+              </Button>
+              <Button size="small" onClick={() => setRecording(null)}>
+                Cancel
               </Button>
             </MessageBarActions>
           </MessageBar>
         )}
-
-        <QuickActions
-          disabled={busy || !!job}
-          onAggregate={onAggregate}
-          onClean={() => setCleanOpen(true)}
-          onExtract={() => setExtractOpen(true)}
-          onFormatTable={simple(formatSelectionAsTable, "Formatted as table")}
-          onAutofit={simple(autofitAllColumns, "All columns auto-fitted")}
-          onRemoveEmptyRows={onRemoveEmpty("rows")}
-          onRemoveEmptyColumns={onRemoveEmpty("columns")}
-          onExplainFormula={onExplainFormula}
-          onGenerateFormula={() => setGenOpen(true)}
-          onAnalyze={onAnalyze}
-          onChart={() => setChartOpen(true)}
-          onDeclineCurve={openDeclineCurve}
-          onProductionQc={onProductionQc}
-          onUnits={() => setUnitOpen(true)}
-          onEspCheck={onEspCheck}
-          onEspAnalysis={openEspAnalysis}
-          onDraw={openDraw}
-          onPickFunction={onPickFunction}
-          onFreeze={onFreeze}
-          onDailyReport={openDailyReport}
-          onEspLogTemplate={onEspLogTemplate}
-          onEspLogAnalyze={openEspLog}
-          onFormulaAudit={onFormulaAudit}
-          onSuggestRules={onSuggestRules}
-          onFindDupes={openFindDupes}
-          onFillGaps={openFillGaps}
-          onFixImport={onFixImport}
-          onExplainSheet={onExplainSheet}
-          onSheetGuide={onSheetGuide}
-          onNamedInputs={() => openNamedInputs()}
-        />
 
         {job && (
           <MessageBar intent="info" className="zee-banner" layout={job.progress !== undefined ? "multiline" : "auto"}>
@@ -1415,7 +1750,16 @@ export default function App() {
           </MessageBar>
         )}
 
-        <ChatFeed messages={messages} onSuggestion={sendChat} />
+        <ChatFeed messages={messages} onSuggestion={sendChat} onPrefill={editPrompt} onSearchTools={() => setPaletteOpen(true)} />
+        <CommandPalette
+          open={paletteOpen}
+          commands={allCommands}
+          pinned={settings.pinnedTools}
+          maxPins={MAX_PINNED_TOOLS}
+          can={canUse}
+          onTogglePin={onTogglePin}
+          onClose={() => setPaletteOpen(false)}
+        />
 
         <ChatInput
           busy={busy}
@@ -1440,7 +1784,7 @@ export default function App() {
             usage={usage}
             onChange={updateSettings}
             onImport={(patch) => {
-              updateSettings({ ...patch, theme: ["auto", "light", "dark"].includes(String(patch.theme ?? settings.theme)) ? patch.theme ?? settings.theme : "auto" });
+              updateSettings({ ...patch, themeMigrated: true, theme: ["auto", "light", "dark"].includes(String(patch.theme ?? settings.theme)) ? patch.theme ?? settings.theme : settings.theme });
               toast("success", "Settings imported", "Check Connection – the API key is only included when it was exported with it.");
             }}
             onClose={() => setSettingsOpen(false)}
@@ -1465,6 +1809,29 @@ export default function App() {
         <RulesDialog rules={rules} onClose={() => setRules(null)} onApply={onApplyRules} />
         <DupesDialog scan={dupeScan} onClose={() => setDupeScan(null)} onApply={onApplyDupes} />
         <GapDialog headers={gapHeaders} onClose={() => setGapHeaders(null)} onRun={onFillGaps} />
+        <NodalDialog open={nodalOpen} last={nodalLast} onClose={() => setNodalOpen(false)} onRun={onNodal} />
+        <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onRun={onImportFile} />
+        <MergeDialog sheets={mergeSheets} onClose={() => setMergeSheets(null)} onRun={onMerge} />
+        <ResampleDialog target={resampleTarget} onClose={() => setResampleTarget(null)} onRun={onResample} />
+        <RecipeSaveDialog
+          steps={saveSteps}
+          onClose={() => setSaveSteps(null)}
+          onSave={(name, steps) => {
+            setSaveSteps(null);
+            persistRecipes([...recipes, { id: newId(), name, created: Date.now(), steps }]);
+            toast("success", `Recipe “${name}” saved`, "Run it from Recipes on next month's data.");
+          }}
+        />
+        <RecipeRunDialog recipe={runTarget?.recipe ?? null} sheets={runTarget?.sheets ?? []} active={runTarget?.active ?? ""} onClose={() => setRunTarget(null)} onRun={doRunRecipe} />
+        <RecipeImportDialog
+          open={recipeImportOpen}
+          onClose={() => setRecipeImportOpen(false)}
+          onAdd={(r) => {
+            setRecipeImportOpen(false);
+            persistRecipes([...recipes, r]);
+            toast("success", `Recipe “${r.name}” added`, `${r.steps.length} steps.`);
+          }}
+        />
         <ConstantsDialog scan={constScan} onClose={() => setConstScan(null)} onApply={onApplyConstants} />
         <ConfirmDialog state={confirmState} onResult={onConfirmResult} />
         <Toaster toasterId={toasterId} position="top-end" />

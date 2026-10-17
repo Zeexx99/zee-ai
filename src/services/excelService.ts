@@ -14,6 +14,7 @@ import { coerceCell, type Cell } from "../utils/markdown";
 import { convertValue, type UnitConversion } from "../utils/petro";
 import { chartTypeInfo, checkYCount, supportsLogScale, supportsSecondaryAxis } from "../utils/chartTypes";
 import { canRevertAlone } from "../utils/undoHistory";
+import { canUse } from "../qol/requirements";
 
 /* ------------------------------------------------------------------ errors */
 
@@ -80,6 +81,74 @@ export async function run<T>(fn: (ctx: Excel.RequestContext) => Promise<T>): Pro
  */
 export function autofitAllOf(r: Excel.Range) {
   r.worksheet.getUsedRange(true).getEntireColumn().format.autofitColumns();
+}
+
+/* ---------------------------------------------------------------- large ranges (chunked reads / writes) */
+
+/**
+ * Office.js rejects a single request/response above ~5 MB (Excel on the web is the strictest), which a
+ * 100k-row block easily exceeds. Big reads and writes are therefore split into row chunks of about
+ * CHUNK_CELLS cells, each with its own sync. Small blocks still take one round trip.
+ */
+export const CHUNK_CELLS = 20_000;
+
+export function chunkRows(columns: number, cellsPerChunk = CHUNK_CELLS): number {
+  return Math.max(1, Math.floor(cellsPerChunk / Math.max(1, columns)));
+}
+
+type LoadProp = "values" | "text" | "formulas" | "numberFormat";
+type Loaded = { values: unknown[][]; text: string[][]; formulas: unknown[][]; numberFormat: unknown[][] };
+
+/** Load properties of a block in row chunks. Arrays come back concatenated in row order. */
+export async function loadChunked<K extends LoadProp>(
+  ctx: Excel.RequestContext,
+  ws: Excel.Worksheet,
+  rowIndex: number,
+  columnIndex: number,
+  rowCount: number,
+  columnCount: number,
+  props: K[],
+  onProgress?: (done: number, total: number) => void
+): Promise<Pick<Loaded, K>> {
+  const out = Object.fromEntries(props.map((p) => [p, [] as unknown[][]])) as unknown as Pick<Loaded, K>;
+  const step = chunkRows(columnCount * props.length);
+  for (let start = 0; start < rowCount; start += step) {
+    const n = Math.min(step, rowCount - start);
+    const r = ws.getRangeByIndexes(rowIndex + start, columnIndex, n, columnCount);
+    r.load(props.join(","));
+    await ctx.sync();
+    for (const p of props) {
+      const part = (r as unknown as Record<string, unknown[][]>)[p];
+      const arr = (out as unknown as Record<string, unknown[][]>)[p];
+      for (const row of part) arr.push(row);
+    }
+    onProgress?.(start + n, rowCount);
+  }
+  return out;
+}
+
+/** Write a 2D array in row chunks (values, formulas or number formats). */
+export async function writeChunked(
+  ctx: Excel.RequestContext,
+  ws: Excel.Worksheet,
+  rowIndex: number,
+  columnIndex: number,
+  data: unknown[][],
+  prop: "values" | "formulas" | "numberFormat" = "values",
+  onProgress?: (done: number, total: number) => void
+): Promise<void> {
+  if (!data.length) return;
+  const width = Math.max(...data.map((r) => r.length));
+  const step = chunkRows(width);
+  for (let start = 0; start < data.length; start += step) {
+    const part = data.slice(start, start + step);
+    const r = ws.getRangeByIndexes(rowIndex + start, columnIndex, part.length, width);
+    (r as unknown as Record<string, unknown>)[prop] = part;
+    if (data.length > step) {
+      await ctx.sync();
+      onProgress?.(Math.min(start + step, data.length), data.length);
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- snapshot / undo (multi-step) */
@@ -237,6 +306,7 @@ export function toSettableFormat(props: Excel.CellProperties[][]): Excel.Settabl
  */
 export function prepareFormatSnapshot(r: Excel.Range, sheetName: string, label: string): (() => Snapshot) | null {
   if (r.rowCount * r.columnCount > FORMAT_UNDO_MAX_CELLS) return null;
+  if (!canUse("formatUndo")) return null; // Excel without ExcelApi 1.9: change still works, just not undoable
   const props = r.getCellProperties(FORMAT_LOAD);
   r.load("address,numberFormat");
   return () => ({ kind: "format", sheetName, address: r.address, props: toSettableFormat(props.value), numberFormat: r.numberFormat, label });
@@ -508,36 +578,37 @@ export async function writeMatrixAtActiveCell(matrix: Cell[][], opts: WriteOptio
     if (cell.rowIndex + data.length > EXCEL_MAX_ROWS) throw new ExcelUserError("Not enough rows below the active cell.");
 
     const target = sheet.getRangeByIndexes(cell.rowIndex, cell.columnIndex, data.length, width);
-    target.load("address,formulas,numberFormat,rowCount,columnCount");
+    target.load("address,rowCount,columnCount");
     await ctx.sync();
-    if (!opts.overwrite && hasContent(target.formulas)) throw new OverwriteRequiredError(target.address);
+    const before = await loadChunked(ctx, sheet, cell.rowIndex, cell.columnIndex, data.length, width, ["formulas", "numberFormat"]);
+    if (!opts.overwrite && hasContent(before.formulas)) throw new OverwriteRequiredError(target.address);
 
     const label = opts.label ?? `insert at ${stripSheet(target.address)}`;
     const cellsSnap: Snapshot = {
       kind: "cells",
       sheetName: sheet.name,
       address: target.address,
-      formulas: target.formulas,
-      numberFormat: target.numberFormat,
+      formulas: before.formulas,
+      numberFormat: before.numberFormat,
       label,
     };
     if (opts.asTable && data.length > 1) {
       // Formatted Excel table: undo removes the table, restores the cells and their old formatting.
       const formatSnap = prepareFormatSnapshot(target, sheet.name, label);
       await ctx.sync();
-      const before = formatSnap?.();
-      target.formulas = data;
+      const beforeFormat = formatSnap?.();
+      await writeChunked(ctx, sheet, cell.rowIndex, cell.columnIndex, data, "formulas");
       const table = sheet.tables.add(target.address, true);
       table.style = "TableStyleMedium2";
       table.load("name");
       autofitAllOf(target);
       target.select();
       await ctx.sync();
-      setSnapshot({ kind: "multi", steps: [...(before ? [before] : []), cellsSnap, { kind: "addedTable", tableName: table.name, label }], label });
+      setSnapshot({ kind: "multi", steps: [...(beforeFormat ? [beforeFormat] : []), cellsSnap, { kind: "addedTable", tableName: table.name, label }], label });
       return target.address;
     }
     setSnapshot(cellsSnap);
-    target.formulas = data;
+    await writeChunked(ctx, sheet, cell.rowIndex, cell.columnIndex, data, "formulas");
     if (opts.header && data.length > 1) target.getRow(0).format.font.bold = true;
     autofitAllOf(target);
     target.select();
@@ -1120,10 +1191,11 @@ export async function setCells(address: string, rows: unknown[][], sheet?: strin
     ws.load("name");
     await ctx.sync();
     const target = ws.getRangeByIndexes(start.rowIndex, start.columnIndex, data.length, width);
-    target.load("address,formulas,numberFormat");
+    target.load("address");
     await ctx.sync();
-    setSnapshot({ kind: "cells", sheetName: ws.name, address: target.address, formulas: target.formulas, numberFormat: target.numberFormat, label: label ?? `write ${stripSheet(target.address)}` });
-    target.formulas = data;
+    const before = await loadChunked(ctx, ws, start.rowIndex, start.columnIndex, data.length, width, ["formulas", "numberFormat"]);
+    setSnapshot({ kind: "cells", sheetName: ws.name, address: target.address, formulas: before.formulas, numberFormat: before.numberFormat, label: label ?? `write ${stripSheet(target.address)}` });
+    await writeChunked(ctx, ws, start.rowIndex, start.columnIndex, data, "formulas");
     await ctx.sync();
     invalidateOverview();
     return target.address;
@@ -1276,7 +1348,7 @@ export async function writeBlock(sheetName: string, topLeft: string, rows: Cell[
     start.load("rowIndex,columnIndex");
     await ctx.sync();
     const target = ws.getRangeByIndexes(start.rowIndex, start.columnIndex, data.length, width);
-    target.values = data;
+    await writeChunked(ctx, ws, start.rowIndex, start.columnIndex, data, "values");
     if (opts.header) {
       const h = target.getRow(0);
       h.format.font.bold = true;
@@ -1305,10 +1377,8 @@ export async function readSelectionBlock(maxCells = 200_000): Promise<SelectionB
     if (c.isEmpty) throw new ExcelUserError("The selected cells are empty.");
     const b = c.block;
     if (b.rowCount * b.columnCount > maxCells) throw new ExcelUserError(`Select fewer than ${maxCells.toLocaleString()} cells.`);
-    const r = c.sheet.getRangeByIndexes(b.rowIndex, b.columnIndex, b.rowCount, b.columnCount);
-    r.load("values,text");
-    await ctx.sync();
-    return { sheetName: c.sheetName, address: b.address, rowIndex: b.rowIndex, columnIndex: b.columnIndex, values: r.values, text: r.text };
+    const r = await loadChunked(ctx, c.sheet, b.rowIndex, b.columnIndex, b.rowCount, b.columnCount, ["values", "text"]);
+    return { sheetName: c.sheetName, address: b.address, rowIndex: b.rowIndex, columnIndex: b.columnIndex, values: r.values, text: r.text as string[][] };
   });
 }
 
@@ -1327,9 +1397,8 @@ export async function readBlockAt(address: string, sheet?: string, maxCells = 20
     await ctx.sync();
     if (r.isNullObject) throw new ExcelUserError(`${address} is empty.`);
     if (r.rowCount * r.columnCount > maxCells) throw new ExcelUserError(`Range is too large (max ${maxCells.toLocaleString()} cells).`);
-    r.load("values,text");
-    await ctx.sync();
-    return { sheetName: ws.name, address: r.address, rowIndex: r.rowIndex, columnIndex: r.columnIndex, values: r.values, text: r.text };
+    const got = await loadChunked(ctx, ws, r.rowIndex, r.columnIndex, r.rowCount, r.columnCount, ["values", "text"]);
+    return { sheetName: ws.name, address: r.address, rowIndex: r.rowIndex, columnIndex: r.columnIndex, values: got.values, text: got.text as string[][] };
   });
 }
 
@@ -1375,13 +1444,11 @@ export async function readRangeValues(address: string, sheet?: string, maxCells 
     target.load("rowCount,columnCount");
     await ctx.sync();
     const r = used.isNullObject ? target : target.getIntersectionOrNullObject(used);
-    r.load("rowCount,columnCount");
+    r.load("rowCount,columnCount,rowIndex,columnIndex");
     await ctx.sync();
     if (r.isNullObject) return [];
     if (r.rowCount * r.columnCount > maxCells) throw new ExcelUserError(`Range is too large (max ${maxCells.toLocaleString()} cells).`);
-    r.load("values");
-    await ctx.sync();
-    return r.values;
+    return (await loadChunked(ctx, ws, r.rowIndex, r.columnIndex, r.rowCount, r.columnCount, ["values"])).values;
   });
 }
 
@@ -1786,5 +1853,54 @@ export async function freezeSelection(): Promise<{ address: string; frozen: numb
     r.values = out as unknown[][] as (string | number | boolean)[][];
     await ctx.sync();
     return { address: r.address, frozen };
+  });
+}
+
+/* ---------------------------------------------------------------- recipes: where the selection is / select a range */
+
+export interface SelectionInfoRaw {
+  sheet: string;
+  rowIndex: number;
+  columnIndex: number;
+  rowCount: number;
+  columnCount: number;
+}
+
+/** The user's selection as-is (not clipped), for recording where a step ran. */
+export async function getSelectionInfo(): Promise<SelectionInfoRaw> {
+  return run(async (ctx) => {
+    const r = ctx.workbook.getSelectedRange();
+    r.load("rowIndex,columnIndex,rowCount,columnCount");
+    const ws = r.worksheet;
+    ws.load("name");
+    await ctx.sync();
+    return { sheet: ws.name, rowIndex: r.rowIndex, columnIndex: r.columnIndex, rowCount: r.rowCount, columnCount: r.columnCount };
+  });
+}
+
+/** Activate a sheet and select a block (rows down to the end of the sheet unless `rows` is given). */
+export async function selectBlock(sheet: string, rowIndex: number, columnIndex: number, columnCount: number, rows?: number): Promise<string> {
+  return run(async (ctx) => {
+    const ws = ctx.workbook.worksheets.getItemOrNullObject(sheet);
+    await ctx.sync();
+    if (ws.isNullObject) throw new ExcelUserError(`Sheet "${sheet}" doesn't exist in this workbook.`);
+    const n = rows ?? EXCEL_MAX_ROWS - rowIndex;
+    const r = ws.getRangeByIndexes(rowIndex, columnIndex, Math.max(1, n), Math.max(1, columnCount));
+    ws.activate();
+    r.select();
+    r.load("address");
+    await ctx.sync();
+    return r.address;
+  });
+}
+
+export async function sheetNames(): Promise<{ names: string[]; active: string }> {
+  return run(async (ctx) => {
+    const s = ctx.workbook.worksheets;
+    s.load("items/name");
+    const a = s.getActiveWorksheet();
+    a.load("name");
+    await ctx.sync();
+    return { names: s.items.map((w) => w.name), active: a.name };
   });
 }

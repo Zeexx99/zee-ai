@@ -81,6 +81,9 @@ async function finishSheet(sheet: string) {
 
 /* ================================================================ selection with header */
 
+/** Tables read in chunks, so this is a memory guard rather than an Office limit (≈ 150k rows × 10 columns). */
+export const BIG_TABLE_CELLS = 1_500_000;
+
 export interface HeaderedSelection {
   block: SelectionBlock;
   headers: string[];
@@ -89,12 +92,12 @@ export interface HeaderedSelection {
 }
 
 export async function readHeaderedSelection(what: string): Promise<HeaderedSelection> {
-  return headered(await readSelectionBlock(400_000), what);
+  return headered(await readSelectionBlock(BIG_TABLE_CELLS), what);
 }
 
 /** Same for an address (agent tools). */
 export async function readHeaderedAt(address: string, sheet: string | undefined, what: string): Promise<HeaderedSelection> {
-  return headered(await readBlockAt(address, sheet, 400_000), what);
+  return headered(await readBlockAt(address, sheet, BIG_TABLE_CELLS), what);
 }
 
 function headered(block: SelectionBlock, what: string): HeaderedSelection {

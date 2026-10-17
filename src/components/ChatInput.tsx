@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
-import { Button, Menu, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Switch, Textarea, Tooltip } from "@fluentui/react-components";
-import { Attach20Regular, Bookmark20Regular, Delete16Regular, Dismiss12Regular, DocumentPdf16Regular, Image16Regular, Send20Filled, Star16Regular, Stop20Filled } from "@fluentui/react-icons";
+import { Button, Menu, MenuDivider, MenuGroupHeader, MenuItem, MenuList, MenuPopover, MenuTrigger, Textarea, ToggleButton, Tooltip } from "@fluentui/react-components";
+import { Attach20Regular, BotSparkle16Regular, Bookmark20Regular, DataUsage16Regular, TableCellsMerge16Regular, Delete16Regular, Dismiss12Regular, DocumentPdf16Regular, Image16Regular, Send20Filled, Star16Regular, Stop20Filled } from "@fluentui/react-icons";
 import { loadPrompts, savePrompts } from "../services/promptStore";
 import type { Attachment } from "../services/geminiService";
 import { ACCEPT_ATTR, mimeOf, pickFiles, readAsBase64 } from "../utils/files";
@@ -127,15 +127,41 @@ export function ChatInput({
       onDrop={onDrop}
     >
       <div className="zee-input-context">
-        <Tooltip content="Agent mode: Zee AI can read and change the workbook (you approve each change)" relationship="description">
-          <Switch checked={agentMode} onChange={(_, d) => onToggleAgent(d.checked)} label="Agent" />
+        <Tooltip content={agentMode ? "Agent on: Zee AI can read and change the workbook (you approve each change). Click to switch to chat only." : "Agent off: answers only, no changes to the workbook. Click to let Zee AI act."} relationship="description">
+          <ToggleButton
+            size="small"
+            shape="circular"
+            className="zee-toggle-chip"
+            checked={agentMode}
+            appearance={agentMode ? "primary" : "outline"}
+            icon={<BotSparkle16Regular />}
+            onClick={() => onToggleAgent(!agentMode)}
+          >
+            Agent
+          </ToggleButton>
         </Tooltip>
-        <Switch checked={includeSelection} onChange={(_, d) => onToggleSelection(d.checked)} label="Selection" />
+        <Tooltip content={includeSelection ? "Your selected cells are sent with each message. Click to stop." : "Selected cells are not sent. Click to include them."} relationship="description">
+          <ToggleButton
+            size="small"
+            shape="circular"
+            className="zee-toggle-chip"
+            checked={includeSelection}
+            appearance={includeSelection ? "primary" : "outline"}
+            icon={<TableCellsMerge16Regular />}
+            onClick={() => onToggleSelection(!includeSelection)}
+          >
+            Selection
+          </ToggleButton>
+        </Tooltip>
         {includeSelection && selectedAddress && (
           <ContextChip label={selectedAddress} ignored={ignoreSelection} onToggle={onIgnoreSelection} title="Sent with your next message" />
         )}
         <span className="zee-spacer" />
-        <UsageMeter today={today} prices={prices} />
+        {today.promptTokens + today.outputTokens > 0 && (
+          <Tooltip content={<UsageMeter today={today} prices={prices} />} relationship="description">
+            <Button size="small" appearance="transparent" className="zee-usage-btn" icon={<DataUsage16Regular />} aria-label="Today's usage" />
+          </Tooltip>
+        )}
       </div>
       {!text.trim() && !busy && !files.length && <PromptChips prompts={prompts} onPick={setText} />}
       {(files.length > 0 || fileError) && (
@@ -172,7 +198,8 @@ export function ChatInput({
           onChange={(_, d) => setText(d.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={agentMode ? "Tell Zee AI what to do in the workbook… (Enter to send, ↑ for earlier prompts)" : "Ask Zee AI… (Enter to send, ↑ for earlier prompts)"}
+          placeholder={agentMode ? "Tell Zee what to do…" : "Ask Zee…"}
+          title="Enter to send · Shift+Enter for a new line · ↑ for earlier prompts"
           resize="vertical"
           rows={2}
         />

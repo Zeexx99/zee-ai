@@ -5,6 +5,12 @@
     <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Zee AI</title>
+    <meta name="color-scheme" content="dark light" />
+    <style>
+      /* Before the stylesheet arrives: dark unless the saved theme is light. */
+      html, body { background: #17161d; color: #ecebf3; margin: 0; }
+      body.zee-light { background: #ffffff; color: #1f1d2b; }
+    </style>
     <script>
       // Early error capture: shows startup errors in the pane and sends them to the dev server log.
       (function () {
@@ -78,6 +84,24 @@
     <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   </head>
   <body>
+    <script>
+      // Paint the saved theme before the app loads, so the pane never flashes white (dark is the default).
+      (function () {
+        var dark = true, accent = "violet", compact = false;
+        try {
+          var s = JSON.parse(localStorage.getItem("zeeai.settings.v1") || "{}") || {};
+          var t = s.theme;
+          if (!s.themeMigrated && (t === undefined || t === "auto")) t = "dark";
+          if (t === "light") dark = false;
+          else if (t === "auto") dark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (s.accent) accent = s.accent;
+          compact = s.density === "compact";
+        } catch (e) {}
+        var b = document.body.classList;
+        b.add(dark ? "zee-dark" : "zee-light", "zee-accent-" + accent);
+        if (compact) b.add("zee-compact");
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

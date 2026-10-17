@@ -2,7 +2,8 @@
  * Excel worksheet functions (shared runtime).
  *
  * AI:     ZEE.ASK, EXTRACT, CLASSIFY, CLEAN, TRANSLATE, SUMMARIZE, FLAG, FORMULA, EXPLAIN
- * Local:  ZEE.UNITS + the petroleum functions (VOGEL, PI, ARPS, TDH, …) – no API call, free.
+ * Local:  ZEE.UNITS + the petroleum functions (VOGEL, PI, ARPS, TDH, …) and the gas-well toolkit
+ *         (Z, BG, GAS_VISC, DELIV, DELIV_Q) – no API call, free.
  *
  * Anti-spam rules for the AI functions:
  *  - Cache: same model + task + input → answer comes from the cache, no new call. Recalc is free.
@@ -31,6 +32,7 @@ import {
   vogelRate,
   type AffinityKind,
 } from "../utils/petroFormulas";
+import { deliverabilityRate, fitDeliverability, flattenNumbers, gasFvf, gasViscosity, zFactor } from "../utils/gasFormulas";
 
 declare const CustomFunctions:
   | {
@@ -402,7 +404,24 @@ const PETRO_FUNCTIONS: Record<string, (...args: any[]) => unknown> = {
   SG_MIX: numeric((wc: number, api: number, waterSg?: number | null) => liquidSg(wc, api, waterSg ?? 1)),
   CONVERT: numeric((v: number, id: string) => convertUnits(v, id)),
   UNITS: numeric((v: unknown, from: string, to: string) => units(v, from, to)),
+  Z: numeric((p: number, t: number, sg: number, co2?: number | null, h2s?: number | null) => zFactor(p, t, sg, co2 ?? 0, h2s ?? 0)),
+  BG: numeric((p: number, t: number, sg: number, unit?: string | null) => gasFvf(p, t, sg, unit || "ft3/scf")),
+  GAS_VISC: numeric((p: number, t: number, sg: number) => gasViscosity(p, t, sg)),
+  DELIV: deliv,
+  DELIV_Q: numeric((c: number, n: number, pr: number, pwf: number) => deliverabilityRate(c, n, pr, pwf)),
 };
+
+/** =ZEE.DELIV(rates, pwfs, Pr) → one row that spills: C, n, AOF. */
+function deliv(rates: unknown, pwfs: unknown, pr: number): number[][] {
+  try {
+    const d = fitDeliverability(flattenNumbers(rates), flattenNumbers(pwfs), pr);
+    return [[d.C, d.n, d.aof]];
+  } catch (e) {
+    const msg = (e as Error).message ?? String(e);
+    if (typeof CustomFunctions !== "undefined") throw new CustomFunctions.Error(CustomFunctions.ErrorCode.invalidNumber ?? "#NUM!", msg.slice(0, 250));
+    throw e;
+  }
+}
 
 /** AI worksheet functions. Metadata lives in public/functions.json. */
 const AI_FUNCTIONS: Record<string, (...args: any[]) => unknown> = {

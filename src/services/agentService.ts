@@ -43,6 +43,11 @@ import { convertUnit, normalizeUnit, UNIT_HELP } from "../utils/units";
 import { analyzeEsp, parseCurve } from "../utils/espAnalysis";
 import { a1, quoteSheet } from "../utils/a1";
 import { summarizeLargeRange } from "./dataTools";
+import { runNodalSheet } from "./nodalActions";
+import { listSheetTables, runMerge, runResample } from "./dataMenu";
+import { findColumn } from "./recipes";
+import type { IprModel, SensitivityKind } from "../utils/nodal";
+import type { Agg, Period, PeriodFill } from "../utils/resample";
 
 export const AGENT_SYSTEM_PROMPT = `You are Zee AI, an expert Microsoft Excel agent running inside an Excel task pane. You can inspect and change the user's workbook with tools. The user is a petroleum engineer; production, well-test and ESP data are common.
 
@@ -55,6 +60,7 @@ HOW TO WORK
 - Use the dedicated tools instead of workarounds: insert_rows_columns / delete_rows_columns, sort_range, filter_range, conditional_format, data_validation, create_pivot_table, freeze_panes, find_cells / replace_text, copy_range, clear_range, add_named_range.
 - Petroleum: fit_decline_curve for Arps decline; production_qc for data-quality checks (writes a report sheet); esp_analysis for ESP performance (TDH, affinity laws, operating range, flags); esp_failure_analysis for run life / MTBF / failure causes from an ESP failure log; convert_units for unit columns.
 - For very large ranges (tens of thousands of rows) use profile_range for statistics over every row plus a sample, instead of read_range.
+- nodal_analysis finds a well's operating point (IPR vs tubing curve, optional what-if on WHP / tubing / water cut / GOR). merge_well_data joins sheets by well (+ date). resample_time_series rolls data up to weeks / months / quarters / years. All three write a new sheet.
 - formula_audit checks a sheet's formulas (errors, #REF!, inconsistent formulas, hard-coded numbers) and writes a report sheet.
 - For charts, pass a contiguous data range whose first row holds the series names.
 - If the user attached images or PDFs (pump curves, well-test reports, scanned tables), read them carefully. When digitising a curve, sample enough points to follow its shape and say the values are read from the image (approximate).
@@ -364,6 +370,79 @@ const BASE_TOOLS: FunctionDeclaration[] = [
       required: ["rate_address", "pip_address", "pd_address", "hz_address"],
     },
   },
+  {
+    name: "nodal_analysis",
+    description:
+      "Nodal analysis of an oil well (node at bottom-hole): IPR (straight-line PI, Vogel or composite) vs VLP (Beggs & Brill, vertical well). Writes a 'Nodal Analysis' sheet with curves, chart and operating point(s) and returns them. Pressures in psia, depth ft, tubing ID inches, rates STB/d liquid.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        reservoir_pressure: NUM,
+        ipr_model: { type: "STRING", enum: ["composite", "vogel", "pi"], description: "composite = PI above bubble point, Vogel below (default)" },
+        pi: { type: "NUMBER", description: "Productivity index STB/d/psi (optional if a test is given)" },
+        test_rate: { type: "NUMBER", description: "Well-test liquid rate STB/d" },
+        test_pwf: { type: "NUMBER", description: "Well-test flowing BHP psia" },
+        bubble_point: { type: "NUMBER", description: "psia, needed for composite" },
+        depth_ft: NUM,
+        tubing_id_in: NUM,
+        whp_psia: NUM,
+        gor: { type: "NUMBER", description: "Producing GOR scf/STB" },
+        water_cut_pct: NUM,
+        api: NUM,
+        gas_sg: NUM,
+        water_sg: NUM,
+        wellhead_temp_f: NUM,
+        bottomhole_temp_f: NUM,
+        sensitivity: { type: "STRING", enum: ["none", "whp", "tubingId", "waterCut", "gor"] },
+        sensitivity_values: { type: "ARRAY", items: NUM, description: "Up to 6 values for the sensitivity (water cut in %)" },
+      },
+      required: ["reservoir_pressure", "depth_ft", "tubing_id_in", "whp_psia", "gor", "water_cut_pct", "api"],
+    },
+  },
+  {
+    name: "merge_well_data",
+    description:
+      "Merge 2+ sheets into one table on a new 'Merged' sheet, joined by well name (matched loosely: case, spaces, dashes ignored) and date. date_match 'asof' gives every row of the FIRST sheet the latest row of each other sheet on or before its date (e.g. latest well test per production day). Column names are header texts.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        tables: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: { sheet: STR, well_column: STR, date_column: { type: "STRING", description: "Omit for tables without dates (e.g. a well master list)" } },
+            required: ["sheet", "well_column"],
+          },
+        },
+        date_match: { type: "STRING", enum: ["exact", "asof"] },
+        rows: { type: "STRING", enum: ["all", "first"], description: "all = every well/date in any sheet; first = only those of the first sheet" },
+        max_age_days: { type: "NUMBER", description: "asof only: ignore matches older than this (0 = no limit)" },
+      },
+      required: ["tables"],
+    },
+  },
+  {
+    name: "resample_time_series",
+    description:
+      "Resample a time-series table (header row + rows) to day/week/month/quarter/year, per well when well_column is given. Default rules: rates averaged, volumes/hours summed, cumulatives last value. Writes a new sheet.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        address: { type: "STRING", description: "Table including its header row" },
+        sheet: SHEET,
+        date_column: STR,
+        well_column: STR,
+        period: { type: "STRING", enum: ["day", "week", "month", "quarter", "year"] },
+        fill: { type: "STRING", enum: ["none", "blank", "previous", "linear"], description: "Add missing periods (and how to fill them)" },
+        rules: {
+          type: "ARRAY",
+          description: "Optional per-column rules",
+          items: { type: "OBJECT", properties: { column: STR, rule: { type: "STRING", enum: ["avg", "sum", "last", "first", "min", "max", "count", "skip"] } }, required: ["column", "rule"] },
+        },
+      },
+      required: ["address", "date_column", "period"],
+    },
+  },
 ];
 
 const WEB_SEARCH_TOOL: FunctionDeclaration = {
@@ -373,8 +452,9 @@ const WEB_SEARCH_TOOL: FunctionDeclaration = {
 };
 
 /** Tools offered to the model; web_search only when enabled in Settings. */
-export function agentTools(s: Pick<ZeeSettings, "webSearch">): FunctionDeclaration[] {
-  return s.webSearch ? [...BASE_TOOLS, WEB_SEARCH_TOOL] : BASE_TOOLS;
+export function agentTools(s: Pick<ZeeSettings, "webSearch">, isSupported: (tool: string) => boolean = () => true): FunctionDeclaration[] {
+  const tools = s.webSearch ? [...BASE_TOOLS, WEB_SEARCH_TOOL] : BASE_TOOLS;
+  return tools.filter((t) => isSupported(t.name));
 }
 
 /** @deprecated Use agentTools(settings). Kept for older imports. */
@@ -402,6 +482,9 @@ export const WRITE_TOOLS = new Set([
   "convert_units",
   "esp_failure_analysis",
   "formula_audit",
+  "nodal_analysis",
+  "merge_well_data",
+  "resample_time_series",
 ]);
 
 export interface ToolCall {
@@ -485,6 +568,14 @@ export function describeCall(c: ToolCall): string {
       return `Convert ${where(a.source, a.sheet)} from ${a.from_unit} to ${a.to_unit}${a.destination ? ` → ${a.destination}` : ""}`;
     case "esp_analysis":
       return `ESP analysis (rate ${a.rate_address}, PIP ${a.pip_address}, Pd ${a.pd_address}, Hz ${a.hz_address})`;
+    case "nodal_analysis":
+      return `Nodal analysis (Pr ${a.reservoir_pressure ?? "?"} psia, ${a.tubing_id_in ?? "?"}″ tubing, WHP ${a.whp_psia ?? "?"} psia) → new "Nodal Analysis" sheet`;
+    case "merge_well_data": {
+      const t = Array.isArray(a.tables) ? (a.tables as Array<{ sheet?: string }>).map((x) => x.sheet).join(" + ") : "sheets";
+      return `Merge ${t} by well${a.date_match === "asof" ? " (latest on/before each date)" : " & date"} → new "Merged" sheet`;
+    }
+    case "resample_time_series":
+      return `Resample ${where(a.address, a.sheet)} ${a.period ?? ""}ly → new sheet`;
     case "web_search":
       return `Search the web: "${a.query}"`;
     default:
@@ -708,6 +799,69 @@ export async function executeTool(c: ToolCall, ctx?: ToolContext): Promise<Recor
           .filter((r) => r.flags.length)
           .slice(0, 30);
         return { summary, flagged_rows: flagged, note: "Rows are 1-based positions within the given ranges. TDH from (Pd − PIP)/(0.433·SG)." };
+      }
+      case "nodal_analysis": {
+        const wc = n(a.water_cut_pct) ?? 0;
+        const r = await runNodalSheet({
+          ipr: {
+            model: (["composite", "vogel", "pi"].includes(String(a.ipr_model)) ? a.ipr_model : n(a.bubble_point) !== undefined ? "composite" : n(a.test_rate) !== undefined ? "vogel" : "pi") as IprModel,
+            pr: n(a.reservoir_pressure) ?? NaN,
+            pi: n(a.pi),
+            qTest: n(a.test_rate),
+            pwfTest: n(a.test_pwf),
+            pb: n(a.bubble_point),
+          },
+          well: {
+            depth: n(a.depth_ft) ?? NaN,
+            tubingId: n(a.tubing_id_in) ?? NaN,
+            whp: n(a.whp_psia) ?? NaN,
+            gor: n(a.gor) ?? NaN,
+            waterCut: wc > 1 ? wc / 100 : wc,
+            api: n(a.api) ?? NaN,
+            gasSg: n(a.gas_sg) ?? 0.7,
+            waterSg: n(a.water_sg) ?? 1.05,
+            tWh: n(a.wellhead_temp_f) ?? 100,
+            tBh: n(a.bottomhole_temp_f) ?? 200,
+          },
+          sensitivity: s(a.sensitivity) && a.sensitivity !== "none" && Array.isArray(a.sensitivity_values) ? { kind: a.sensitivity as SensitivityKind, values: (a.sensitivity_values as unknown[]).map((v) => n(v) ?? NaN) } : undefined,
+        });
+        return {
+          ok: true,
+          sheet: r.sheet,
+          ipr: r.result.ipr.label,
+          cases: r.result.cases.map((c) => (c.op ? { case: c.label, liquid_rate: Math.round(c.op.q), oil_rate: Math.round(c.op.oil), pwf_psia: Math.round(c.op.pwf), stable: c.op.stable } : { case: c.label, note: c.note })),
+        };
+      }
+      case "merge_well_data": {
+        const list = Array.isArray(a.tables) ? (a.tables as Array<Record<string, unknown>>) : [];
+        const infos = await listSheetTables();
+        const picks = list.map((t) => {
+          const info = infos.find((x) => x.name.toLowerCase() === String(t.sheet ?? "").toLowerCase());
+          if (!info) throw new Error(`Sheet "${t.sheet}" not found or empty. Sheets: ${infos.map((x) => x.name).join(", ")}`);
+          const wellCol = findColumn(info.headers, s(t.well_column));
+          if (wellCol < 0) throw new Error(`Column "${t.well_column}" not found on "${info.name}". Headers: ${info.headers.join(", ")}`);
+          const dateCol = s(t.date_column) ? findColumn(info.headers, s(t.date_column)) : -1;
+          if (s(t.date_column) && dateCol < 0) throw new Error(`Column "${t.date_column}" not found on "${info.name}".`);
+          return { sheet: info.name, wellCol, dateCol };
+        });
+        const asof = a.date_match === "asof";
+        const r = await runMerge(picks, { how: asof || a.rows === "first" ? "left" : "outer", dateMatch: asof ? "asof" : "exact", maxAgeDays: n(a.max_age_days) ?? 0 });
+        return { ok: true, sheet: r.sheet, rows: r.result.stats.outputRows, wells: r.result.stats.wells, per_table: r.result.stats.perTable };
+      }
+      case "resample_time_series": {
+        const sel = await readHeaderedAt(String(a.address), s(a.sheet), "time series");
+        const dateCol = findColumn(sel.headers, s(a.date_column));
+        if (dateCol < 0) return { error: `Date column "${a.date_column}" not found. Headers: ${sel.headers.join(", ")}` };
+        const groupCol = s(a.well_column) ? findColumn(sel.headers, s(a.well_column)) : -1;
+        const aggs: Record<number, Agg> = {};
+        if (Array.isArray(a.rules)) for (const r of a.rules as Array<{ column?: string; rule?: string }>) {
+          const j = findColumn(sel.headers, r.column);
+          if (j >= 0 && r.rule) aggs[j] = r.rule as Agg;
+        }
+        const period = (["day", "week", "month", "quarter", "year"].includes(String(a.period)) ? a.period : "month") as Period;
+        const fill = (["none", "blank", "previous", "linear"].includes(String(a.fill)) ? a.fill : "none") as PeriodFill;
+        const r = await runResample(sel, { dateCol, groupCol: groupCol >= 0 ? groupCol : undefined, period, aggs, fill, countDays: true });
+        return { ok: true, sheet: r.sheet, columns: r.result.headers, ...r.result.stats };
       }
       case "web_search": {
         if (!ctx?.settings.webSearch) return { error: "Web search is turned off in Settings." };

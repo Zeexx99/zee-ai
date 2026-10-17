@@ -21,7 +21,7 @@ import {
   Switch,
 } from "@fluentui/react-components";
 import { ArrowSync16Regular, Dismiss24Regular, Eye20Regular, EyeOff20Regular, Person16Regular } from "@fluentui/react-icons";
-import { DEFAULT_MODELS, DEFAULT_SETTINGS, modelHint, modelLabel, type AuthMode, type ThemeMode, type ZeeSettings } from "../services/settingsService";
+import { ACCENTS, DEFAULT_MODELS, DEFAULT_SETTINGS, modelHint, modelLabel, type AuthMode, type Density, type ThemeMode, type ZeeSettings } from "../services/settingsService";
 import { loadPrompts, savePrompts } from "../services/promptStore";
 import { BackupSection, UsageSection } from "../qol/BackupSection";
 import { getGoogleSession, signInWithGoogle, signOutGoogle, type GoogleSession } from "../services/authService";
@@ -29,6 +29,7 @@ import { listModels, testConnection } from "../services/geminiService";
 import { clearFunctionCache } from "../functions/zeeFunctions";
 import type { UsageTotals } from "../App";
 import { openExternal } from "./insertActions";
+import { ExcelSupportSection } from "../qol/ExcelSupport";
 
 interface Props {
   open: boolean;
@@ -290,12 +291,31 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
 
         <section>
           <h3>Appearance</h3>
-          <RadioGroup layout="horizontal" value={settings.theme} onChange={(_, d) => onChange({ theme: d.value as ThemeMode })} aria-label="Theme">
-            <Radio value="auto" label="Match Office" />
-            <Radio value="light" label="Light" />
-            <Radio value="dark" label="Dark" />
-          </RadioGroup>
-          <p className="zee-muted">"Match Office" follows your Office theme (File → Account → Office Theme). Tip: the moon/sun button in the header switches quickly.</p>
+          <Field label="Theme">
+            <RadioGroup layout="horizontal" value={settings.theme} onChange={(_, d) => onChange({ theme: d.value as ThemeMode })} aria-label="Theme">
+              <Radio value="dark" label="Dark (default)" />
+              <Radio value="light" label="Light" />
+              <Radio value="auto" label="Match Office" />
+            </RadioGroup>
+          </Field>
+          <p className="zee-muted">"Match Office" follows your Office theme (File → Account → Office Theme). Quick switch: ⋯ in the header → Light / Dark mode.</p>
+          <Field label="Accent colour">
+            <div className="zee-accents" role="group" aria-label="Accent colour">
+              {ACCENTS.map((a) => (
+                <button key={a.id} type="button" className="zee-accent-swatch" aria-pressed={settings.accent === a.id} onClick={() => onChange({ accent: a.id })}>
+                  <span className="zee-accent-dot" style={{ background: a.hex }} />
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Density">
+            <RadioGroup layout="horizontal" value={settings.density} onChange={(_, d) => onChange({ density: d.value as Density })} aria-label="Density">
+              <Radio value="comfortable" label="Comfortable" />
+              <Radio value="compact" label="Compact (small screens)" />
+            </RadioGroup>
+          </Field>
+          <p className="zee-muted">Windows high-contrast mode is followed automatically when it's on.</p>
         </section>
 
         <Divider />
@@ -410,7 +430,8 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
           <p className="zee-muted">
             Petroleum functions (instant, no AI): <code>ZEE.VOGEL</code>, <code>ZEE.VOGEL_QMAX</code>, <code>ZEE.PI</code>, <code>ZEE.RS</code>, <code>ZEE.PB</code>,{" "}
             <code>ZEE.BO</code>, <code>ZEE.ARPS</code>, <code>ZEE.ARPS_CUM</code>, <code>ZEE.TDH</code>, <code>ZEE.HHP</code>, <code>ZEE.AFFINITY</code>,{" "}
-            <code>ZEE.SG_MIX</code>, <code>ZEE.CONVERT</code>. Type <code>=ZEE.</code> in a cell to see their arguments.
+            <code>ZEE.SG_MIX</code>, <code>ZEE.CONVERT</code>. Gas wells: <code>ZEE.Z</code>, <code>ZEE.BG</code>, <code>ZEE.GAS_VISC</code>,{" "}
+            <code>ZEE.DELIV</code>, <code>ZEE.DELIV_Q</code>. Type <code>=ZEE.</code> in a cell to see their arguments.
           </p>
           <div className="zee-row">
             <Button
@@ -435,6 +456,10 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
         <Divider />
 
         <BackupSection settings={settings} defaults={DEFAULT_SETTINGS} onImport={onImport} loadPrompts={loadPrompts} savePrompts={savePrompts} />
+
+        <Divider />
+
+        <ExcelSupportSection />
       </DrawerBody>
     </OverlayDrawer>
   );

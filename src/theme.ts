@@ -1,5 +1,9 @@
-import { useEffect, useLayoutEffect, useState } from "react";
-import { createDarkTheme, createLightTheme, type BrandVariants, type Theme } from "@fluentui/react-components";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createDarkTheme, createLightTheme, teamsHighContrastTheme, type BrandVariants, type Theme } from "@fluentui/react-components";
+import type { AccentColor, Density } from "./services/settingsService";
+
+type Shade = keyof BrandVariants;
+const SHADES: Shade[] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160];
 
 /** Zee AI brand ramp (violet → used for primary buttons, focus, links). */
 const zeeBrand: BrandVariants = {
@@ -21,8 +25,40 @@ const zeeBrand: BrandVariants = {
   160: "#E5E2FE",
 };
 
-export const lightTheme: Theme = createLightTheme(zeeBrand);
-export const darkTheme: Theme = { ...createDarkTheme(zeeBrand), colorBrandForeground1: zeeBrand[120], colorBrandForeground2: zeeBrand[130] };
+function mix(hex: string, target: number, amount: number): string {
+  const h = hex.replace("#", "");
+  const ch = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  return `#${ch.map((c) => Math.round(c + (target - c) * amount).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+/**
+ * Builds a 16-step Fluent brand ramp around one colour (shade 80 = the colour itself).
+ * Darker shades mix towards black, lighter ones towards white. Pure – unit-tested.
+ */
+export function rampFrom(hex: string): BrandVariants {
+  const out = {} as BrandVariants;
+  SHADES.forEach((s, i) => {
+    const idx = i - 7; // shade 80 sits at index 7
+    out[s] = idx < 0 ? mix(hex, 0, (-idx / 7) * 0.92) : idx === 0 ? hex.toUpperCase() : mix(hex, 255, (idx / 8) * 0.86);
+  });
+  return out;
+}
+
+const RAMPS: Record<AccentColor, BrandVariants> = {
+  violet: zeeBrand,
+  teal: rampFrom("#00897B"),
+  blue: rampFrom("#1F6FD1"),
+  orange: rampFrom("#D9640F"),
+};
+
+export function makeTheme(dark: boolean, accent: AccentColor = "violet"): Theme {
+  const brand = RAMPS[accent] ?? zeeBrand;
+  return dark ? { ...createDarkTheme(brand), colorBrandForeground1: brand[120], colorBrandForeground2: brand[130] } : createLightTheme(brand);
+}
+
+export const lightTheme: Theme = makeTheme(false);
+export const darkTheme: Theme = makeTheme(true);
+export const highContrastTheme: Theme = teamsHighContrastTheme;
 
 /** Follow the Office theme (falls back to the OS colour scheme). */
 export function prefersDark(): boolean {
@@ -77,10 +113,44 @@ export function useAutoDark(): boolean {
   return dark;
 }
 
-/** Applies the theme class to <body> synchronously so portals (dialogs, drawer, toasts) match and nothing flashes. */
-export function useBodyThemeClass(dark: boolean) {
+/** True while Windows high-contrast mode (forced colours) is on. */
+export function useHighContrast(): boolean {
+  const query = "(forced-colors: active)";
+  const [hc, setHc] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.(query);
+    const check = () => setHc(!!mq?.matches);
+    mq?.addEventListener?.("change", check);
+    return () => mq?.removeEventListener?.("change", check);
+  }, []);
+  return hc;
+}
+
+export interface BodyLook {
+  dark: boolean;
+  accent: AccentColor;
+  density: Density;
+  highContrast: boolean;
+}
+
+/**
+ * Applies theme / accent / density classes to <body> synchronously so portals (dialogs, drawer,
+ * toasts) match and nothing flashes. Theme switches after the first paint fade briefly.
+ */
+export function useBodyThemeClass(look: BodyLook | boolean) {
+  const l: BodyLook = typeof look === "boolean" ? { dark: look, accent: "violet", density: "comfortable", highContrast: false } : look;
+  const first = useRef(true);
   useLayoutEffect(() => {
-    document.body.classList.toggle("zee-dark", dark);
-    document.body.classList.toggle("zee-light", !dark);
-  }, [dark]);
+    const b = document.body.classList;
+    if (!first.current) {
+      b.add("zee-theme-anim");
+      window.setTimeout(() => b.remove("zee-theme-anim"), 350);
+    }
+    first.current = false;
+    b.toggle("zee-dark", l.dark);
+    b.toggle("zee-light", !l.dark);
+    for (const a of ["violet", "teal", "blue", "orange"]) b.toggle(`zee-accent-${a}`, l.accent === a);
+    b.toggle("zee-compact", l.density === "compact");
+    b.toggle("zee-hc", l.highContrast);
+  }, [l.dark, l.accent, l.density, l.highContrast]);
 }

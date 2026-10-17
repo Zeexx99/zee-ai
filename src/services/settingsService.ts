@@ -9,8 +9,20 @@
 
 export type AuthMode = "apiKey" | "google" | "proxy";
 
-/** "auto" follows the Office theme (or the OS colour scheme outside Office). */
+/** "auto" follows the Office theme (or the OS colour scheme outside Office). Default: dark. */
 export type ThemeMode = "auto" | "light" | "dark";
+
+/** Brand colour used for buttons, links, focus rings and your chat bubbles. */
+export type AccentColor = "violet" | "teal" | "blue" | "orange";
+export const ACCENTS: Array<{ id: AccentColor; label: string; hex: string }> = [
+  { id: "violet", label: "Violet", hex: "#5B42E0" },
+  { id: "teal", label: "Teal", hex: "#00897B" },
+  { id: "blue", label: "Blue", hex: "#1F6FD1" },
+  { id: "orange", label: "Orange", hex: "#D9640F" },
+];
+
+/** Spacing and text size of the task pane. */
+export type Density = "comfortable" | "compact";
 
 export interface ModelInfo {
   id: string;
@@ -70,6 +82,14 @@ export interface ZeeSettings {
   bigDataMode: boolean;
   /** Rows from which big-data mode kicks in. */
   bigDataRows: number;
+  /** Brand colour (Settings → Appearance). */
+  accent: AccentColor;
+  /** Comfortable (default) or compact spacing. */
+  density: Density;
+  /** Tool ids pinned as one-click buttons on the toolbar (star them in Ctrl+K search). */
+  pinnedTools: string[];
+  /** Set once the one-time "dark by default" switch (v1.9) has been applied on this PC. */
+  themeMigrated: boolean;
 }
 
 export const DEFAULT_SETTINGS: ZeeSettings = {
@@ -89,7 +109,7 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   costGuardTokens: 20000,
   agentMode: true,
   autoApprove: false,
-  theme: "auto",
+  theme: "dark",
   webSearch: false,
   codeExecution: false,
   priceInPerM: 0,
@@ -97,7 +117,34 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   agentDryRun: true,
   bigDataMode: true,
   bigDataRows: 100_000,
+  accent: "violet",
+  density: "comfortable",
+  pinnedTools: [],
+  themeMigrated: true,
 };
+
+export const MAX_PINNED_TOOLS = 6;
+
+/**
+ * Normalises stored settings (pure – unit-tested).
+ * One-time switch to dark: PCs that had the old default ("Match Office") move to dark once.
+ * After that, whatever the person picks (light, dark or Match Office) is kept.
+ */
+export function normalizeSettings(parsed: Partial<ZeeSettings>): ZeeSettings {
+  const merged: ZeeSettings = { ...DEFAULT_SETTINGS, ...parsed };
+  if (!parsed.themeMigrated) {
+    if (parsed.theme === undefined || parsed.theme === "auto") merged.theme = "dark";
+    merged.themeMigrated = true;
+  }
+  if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "dark";
+  if (!ACCENTS.some((a) => a.id === merged.accent)) merged.accent = "violet";
+  if (merged.density !== "compact") merged.density = "comfortable";
+  merged.pinnedTools = Array.isArray(merged.pinnedTools) ? merged.pinnedTools.filter((t) => typeof t === "string").slice(0, MAX_PINNED_TOOLS) : [];
+  if (!Number.isFinite(merged.priceInPerM) || merged.priceInPerM < 0) merged.priceInPerM = 0;
+  if (!Number.isFinite(merged.priceOutPerM) || merged.priceOutPerM < 0) merged.priceOutPerM = 0;
+  if (!Number.isFinite(merged.bigDataRows) || merged.bigDataRows < 1000) merged.bigDataRows = DEFAULT_SETTINGS.bigDataRows;
+  return merged;
+}
 
 export const STORAGE_KEY = "zeeai.settings.v1";
 
@@ -106,11 +153,9 @@ export function loadSettings(): ZeeSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<ZeeSettings>;
-    const merged = { ...DEFAULT_SETTINGS, ...parsed };
-    if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "auto";
-    if (!Number.isFinite(merged.priceInPerM) || merged.priceInPerM < 0) merged.priceInPerM = 0;
-    if (!Number.isFinite(merged.priceOutPerM) || merged.priceOutPerM < 0) merged.priceOutPerM = 0;
-    if (!Number.isFinite(merged.bigDataRows) || merged.bigDataRows < 1000) merged.bigDataRows = DEFAULT_SETTINGS.bigDataRows;
+    const merged = normalizeSettings(parsed);
+    // Persist the one-time dark switch right away so it never runs twice.
+    if (!parsed.themeMigrated) saveSettings(merged);
     return merged;
   } catch {
     return { ...DEFAULT_SETTINGS };

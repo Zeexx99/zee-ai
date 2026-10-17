@@ -121,9 +121,47 @@ const ACTION_ICON: Record<ActionLog["status"], JSX.Element> = {
   error: <ErrorCircle16Regular />,
 };
 
-function ActionList({ actions }: { actions: ActionLog[] }) {
-  if (!actions.length) return null;
+/** "14:05" today, "12 Oct 14:05" on other days. Pure – unit-tested. */
+export function formatMessageTime(at: number, now = Date.now()): string {
+  const d = new Date(at);
+  const n = new Date(now);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === n.toDateString()) return hm;
+  const month = d.toLocaleString("en-GB", { month: "short" });
+  return `${d.getDate()} ${month}${d.getFullYear() !== n.getFullYear() ? ` ${d.getFullYear()}` : ""} ${hm}`;
+}
+
+function MessageTime({ at }: { at?: number }) {
+  if (!at) return null;
   return (
+    <time className="zee-time" dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString()}>
+      {formatMessageTime(at)}
+    </time>
+  );
+}
+
+/** "Working · step 3" while the agent runs; nothing once it has finished. Pure – unit-tested. */
+export function agentProgressLabel(actions: Pick<ActionLog, "status">[], running: boolean): string | null {
+  if (!actions.length) return null;
+  const n = actions.length;
+  if (running) {
+    const current = actions.findIndex((a) => a.status === "running");
+    return `Working · step ${current >= 0 ? current + 1 : n}${current >= 0 ? "" : " done, thinking…"}`;
+  }
+  return null;
+}
+
+function ActionList({ actions, running }: { actions: ActionLog[]; running: boolean }) {
+  const progress = agentProgressLabel(actions, running);
+  if (!actions.length && !progress) return null;
+  return (
+    <>
+    {progress && (
+      <div className="zee-step" role="status">
+        <Spinner size="extra-tiny" /> {progress}
+      </div>
+    )}
+    {actions.length > 0 && (
     <ul className="zee-actions">
       {actions.map((a, i) => (
         <li key={i} className={`zee-action zee-action-${a.status}`} title={a.detail}>
@@ -132,6 +170,8 @@ function ActionList({ actions }: { actions: ActionLog[] }) {
         </li>
       ))}
     </ul>
+    )}
+    </>
   );
 }
 
@@ -318,6 +358,7 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
         ))}
         {message.contextLabel && <div className="zee-chip">📎 {message.contextLabel}</div>}
         <UserMessageTools text={message.text} />
+        <MessageTime at={message.at} />
       </div>
     );
   }
@@ -327,7 +368,7 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
   const working = streaming && !message.text && !message.pending;
   return (
     <div className="zee-msg zee-msg-assistant">
-      {message.mode === "agent" && message.actions && <ActionList actions={message.actions} />}
+      {message.mode === "agent" && message.actions && <ActionList actions={message.actions} running={streaming && !message.pending && !message.text} />}
       {message.pending && <ApprovalCard pending={message.pending} />}
       <div className="zee-bubble zee-markdown">
         {message.text ? (
@@ -335,7 +376,7 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
             {message.text}
           </ReactMarkdown>
         ) : working ? (
-          <Spinner size="tiny" label={message.mode === "agent" ? "Working on your workbook…" : "Thinking…"} labelPosition="after" />
+          <Spinner size="tiny" label={message.mode === "agent" && !message.actions?.length ? "Working on your workbook…" : "Thinking…"} labelPosition="after" />
         ) : message.pending ? (
           <span className="zee-muted">Waiting for your approval…</span>
         ) : null}
@@ -345,6 +386,7 @@ function MessageBubbleImpl({ message }: { message: ChatMessage }) {
       {!streaming && message.canContinue && <ContinueButton />}
       {!streaming && (
         <div className="zee-meta">
+          {message.at && <MessageTime at={message.at} />}
           {message.model && <span>{modelLabel(message.model)}</span>}
           {message.mode === "agent" && <span className="zee-chip zee-chip-inline">agent</span>}
           {message.usage && (

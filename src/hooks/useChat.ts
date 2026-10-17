@@ -7,6 +7,7 @@ import { runAgentLoop, type ActionLog } from "../services/agentLoop";
 import { clearChat, getDocId, loadChat, saveChat } from "../services/chatStore";
 import { invalidateOverview, writeTargetHasData } from "../services/excelService";
 import { dryRunPreview, type DryRunPreview } from "../services/dataTools";
+import { canUseTool } from "../qol/requirements";
 
 export type { ActionLog };
 
@@ -51,6 +52,8 @@ export interface ChatMessage {
   canContinue?: boolean;
   /** GeminiError kind of a failed answer (drives the hint under the error). */
   errorKind?: string;
+  /** When the message was sent (ms since epoch) – shown on hover. Older saved chats don't have it. */
+  at?: number;
 }
 
 export interface SendInput {
@@ -158,9 +161,10 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
         if (!(await confirmLarge(tokens))) return null;
       }
       const attachments = input.attachments?.map(({ name, mimeType, size }) => ({ name, mimeType, size }));
-      const userMsg: ChatMessage = { id: uid(), role: "user", text: input.display, promptText: input.prompt, contextLabel: input.contextLabel, status: "done", mode, ...(attachments?.length ? { attachments } : {}) };
+      const at = Date.now();
+      const userMsg: ChatMessage = { id: uid(), role: "user", text: input.display, promptText: input.prompt, contextLabel: input.contextLabel, status: "done", mode, at, ...(attachments?.length ? { attachments } : {}) };
       const asstId = uid();
-      update((m) => [...m, userMsg, { id: asstId, role: "assistant", text: "", status: "streaming", model: settings.model, mode, actions: mode === "agent" ? [] : undefined }]);
+      update((m) => [...m, userMsg, { id: asstId, role: "assistant", text: "", status: "streaming", model: settings.model, mode, at, actions: mode === "agent" ? [] : undefined }]);
       const controller = new AbortController();
       abortRef.current = controller;
       setBusy(true);
@@ -238,7 +242,7 @@ export function useChat({ getSettings, onUsage, confirmLarge }: ChatHookOptions)
       if (!ctx) return;
       const { settings, history, asstId, controller } = ctx;
       const contents: GeminiContent[] = history.map(turnToContent);
-      const tools = agentTools(settings);
+      const tools = agentTools(settings, canUseTool); // tools this Excel version can run
       let actionCount = 0;
 
       // Stream the model's text, at most once per animation frame.

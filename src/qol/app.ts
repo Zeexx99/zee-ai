@@ -21,6 +21,33 @@ export interface ReleaseNote {
 /** Shown once after an update ("What's new"). Newest first. */
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "1.9.0",
+    items: [
+      "Dark theme is now the default (light and Match Office are still in Settings → Appearance, or ⋯ → Light mode). The pane no longer flashes white when it opens.",
+      "Search all tools with Ctrl+K (or the 🔍 at the start of the toolbar). Click ☆ next to a tool to pin it to the toolbar as a one-click button (up to 6).",
+      "Tidier header: Undo, New chat and Settings stay visible; history, export and the theme switch moved into ⋯.",
+      "Toolbar shows ‹ › arrows when it doesn't fit; notices fold into one line with \"+N more\".",
+      "New welcome screen with petroleum starters (daily production, ESP readings, well test QC) and your recent prompts.",
+      "A \"Latest\" button brings you back down when you scroll up during an answer; times show on hover; agent runs show which step they're on.",
+      "Agent and Selection are now toggle chips; today's usage moved into a small icon.",
+      "Settings → Appearance: accent colour (violet, teal, blue, orange) and compact density. Windows high-contrast mode is followed automatically.",
+    ],
+  },
+  {
+    version: "1.8.0",
+    items: [
+      "Petroleum → Nodal analysis: IPR (PI, Vogel or composite) against the tubing curve (Beggs & Brill) – operating point, curves and chart on a new sheet, plus what-if on wellhead pressure, tubing size, water cut or GOR.",
+      "Gas-well functions: =ZEE.Z (Z-factor), =ZEE.BG, =ZEE.GAS_VISC, =ZEE.DELIV (fits C and n from a multi-rate test) and =ZEE.DELIV_Q.",
+      "New Data menu → Import file: CSV / TXT, LAS well logs and SCADA exports (tag lists can become one column per tag), with a preview first.",
+      "Data → Merge well data: joins production, well tests, ESP readings… by well and date – even “latest test on or before each day”.",
+      "Data → Resample: daily → weekly / monthly / quarterly / yearly per well, with a rule per column (average, sum, last…).",
+      "Recipes: record what you do once (clean, fill gaps, resample, QC, charts, prompts…) and replay it on next month's data with one click. Share recipes with colleagues as text.",
+      "Big sheets are now read and written in chunks, so tables of 100k+ rows work instead of hitting Excel's size limit.",
+      "Older Excel versions: features they can't run are greyed out with a note instead of failing. Settings → This Excel lists what's available.",
+      "The agent can run nodal analysis, merge sheets and resample time series too.",
+    ],
+  },
+  {
     version: "1.7.0",
     items: [
       "Clean → Find duplicates & outliers: duplicate rows, spellings that differ (\"Well-12\" vs \"W12\") and unusual numbers – highlight them, unify spellings or delete duplicates. Undoable.",
