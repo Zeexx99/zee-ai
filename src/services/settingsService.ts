@@ -7,7 +7,10 @@
  * which is per user, per machine and never written into the workbook.
  */
 
-export type AuthMode = "apiKey" | "google" | "proxy";
+import { DEFAULT_OTHER_BASE_URL, DEFAULT_OTHER_MODEL } from "./openaiCompat";
+
+/** "openai" = Other API key: any OpenAI-compatible provider (Groq, OpenRouter, OpenAI, Mistral…). */
+export type AuthMode = "apiKey" | "openai" | "google" | "proxy";
 
 /** "auto" follows the Office theme (or the OS colour scheme outside Office). Default: dark. */
 export type ThemeMode = "auto" | "light" | "dark";
@@ -49,6 +52,15 @@ export interface ZeeSettings {
   model: string;
   /** Extra model IDs fetched from the API with "Refresh". */
   fetchedModels: string[];
+  /** Other API key (OpenAI-compatible provider). */
+  otherBaseUrl: string;
+  otherApiKey: string;
+  /** Model remembered for the other provider while Gemini is selected. */
+  otherModel: string;
+  /** Model IDs fetched from the other provider with "Refresh". */
+  otherFetchedModels: string[];
+  /** Gemini model remembered while the other provider is selected. */
+  geminiModel: string;
   googleClientId: string;
   gcpProjectId: string;
   gcpLocation: string;
@@ -97,6 +109,11 @@ export const DEFAULT_SETTINGS: ZeeSettings = {
   apiKey: "",
   model: DEFAULT_MODELS[0].id,
   fetchedModels: [],
+  otherBaseUrl: DEFAULT_OTHER_BASE_URL,
+  otherApiKey: "",
+  otherModel: DEFAULT_OTHER_MODEL,
+  otherFetchedModels: [],
+  geminiModel: DEFAULT_MODELS[0].id,
   googleClientId: "",
   gcpProjectId: "",
   gcpLocation: "global",
@@ -137,6 +154,11 @@ export function normalizeSettings(parsed: Partial<ZeeSettings>): ZeeSettings {
     merged.themeMigrated = true;
   }
   if (!["auto", "light", "dark"].includes(merged.theme)) merged.theme = "dark";
+  if (!["apiKey", "openai", "google", "proxy"].includes(merged.authMode)) merged.authMode = "apiKey";
+  if (typeof merged.otherBaseUrl !== "string" || !merged.otherBaseUrl.trim()) merged.otherBaseUrl = DEFAULT_OTHER_BASE_URL;
+  if (typeof merged.otherApiKey !== "string") merged.otherApiKey = "";
+  if (!Array.isArray(merged.otherFetchedModels)) merged.otherFetchedModels = [];
+  if (typeof merged.model !== "string" || !merged.model.trim()) merged.model = merged.authMode === "openai" ? merged.otherModel || DEFAULT_OTHER_MODEL : DEFAULT_MODELS[0].id;
   if (!ACCENTS.some((a) => a.id === merged.accent)) merged.accent = "violet";
   if (merged.density !== "compact") merged.density = "comfortable";
   merged.pinnedTools = Array.isArray(merged.pinnedTools) ? merged.pinnedTools.filter((t) => typeof t === "string").slice(0, MAX_PINNED_TOOLS) : [];
@@ -178,8 +200,20 @@ export function modelHint(id: string): string | undefined {
   return DEFAULT_MODELS.find((m) => m.id === id)?.hint;
 }
 
+/**
+ * Settings patch for switching connection. Gemini and the other provider each keep their own model,
+ * so switching back and forth restores the model that was picked for that side.
+ */
+export function switchAuthMode(s: ZeeSettings, mode: AuthMode): Partial<ZeeSettings> {
+  if (mode === s.authMode) return {};
+  if (mode === "openai") return { authMode: mode, geminiModel: s.model, model: s.otherModel.trim() || DEFAULT_OTHER_MODEL };
+  if (s.authMode === "openai") return { authMode: mode, otherModel: s.model, model: s.geminiModel.trim() || DEFAULT_MODELS[0].id };
+  return { authMode: mode };
+}
+
 export function isConfigured(s: ZeeSettings): boolean {
   if (s.authMode === "apiKey") return s.apiKey.trim().length > 0;
+  if (s.authMode === "openai") return s.otherApiKey.trim().length > 0 && s.otherBaseUrl.trim().length > 0;
   if (s.authMode === "proxy") return s.proxyUrl.trim().length > 0;
   return s.googleClientId.trim().length > 0 && s.gcpProjectId.trim().length > 0;
 }

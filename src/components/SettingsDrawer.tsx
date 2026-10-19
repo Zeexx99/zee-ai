@@ -21,11 +21,12 @@ import {
   Switch,
 } from "@fluentui/react-components";
 import { ArrowSync16Regular, Dismiss24Regular, Eye20Regular, EyeOff20Regular, Person16Regular } from "@fluentui/react-icons";
-import { ACCENTS, DEFAULT_MODELS, DEFAULT_SETTINGS, modelHint, modelLabel, type AuthMode, type Density, type ThemeMode, type ZeeSettings } from "../services/settingsService";
+import { ACCENTS, DEFAULT_MODELS, DEFAULT_SETTINGS, modelHint, modelLabel, switchAuthMode, type AuthMode, type Density, type ThemeMode, type ZeeSettings } from "../services/settingsService";
+import { OTHER_PROVIDERS, providerName, providerOf } from "../services/openaiCompat";
 import { loadPrompts, savePrompts } from "../services/promptStore";
 import { BackupSection, UsageSection } from "../qol/BackupSection";
 import { getGoogleSession, signInWithGoogle, signOutGoogle, type GoogleSession } from "../services/authService";
-import { listModels, testConnection } from "../services/geminiService";
+import { listModels, listOtherModels, testConnection } from "../services/geminiService";
 import { clearFunctionCache } from "../functions/zeeFunctions";
 import type { UsageTotals } from "../App";
 import { openExternal } from "./insertActions";
@@ -71,10 +72,18 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
     }
   }, [open]);
 
+  const other = settings.authMode === "openai";
+  const otherName = providerName(settings.otherBaseUrl);
+  const otherPreset = providerOf(settings.otherBaseUrl);
   const extraModels = useMemo(
     () => settings.fetchedModels.filter((id) => !DEFAULT_MODELS.some((m) => m.id === id)),
     [settings.fetchedModels]
   );
+  const otherModels = useMemo(() => {
+    const ids = [...settings.otherFetchedModels];
+    if (otherPreset?.model && !ids.includes(otherPreset.model)) ids.unshift(otherPreset.model);
+    return ids;
+  }, [settings.otherFetchedModels, otherPreset]);
   const signedIn = !!session && minutesLeft(session) > 0;
 
   const runTest = async () => {
@@ -92,9 +101,15 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
   const refreshModels = async () => {
     setRefreshing(true);
     try {
-      const ids = await listModels(settings.apiKey);
-      onChange({ fetchedModels: ids });
-      setStatus({ intent: "info", text: `Loaded ${ids.length} models from your account.` });
+      if (other) {
+        const ids = await listOtherModels(settings);
+        onChange({ otherFetchedModels: ids });
+        setStatus({ intent: "info", text: `Loaded ${ids.length} models from ${otherName}.` });
+      } else {
+        const ids = await listModels(settings.apiKey);
+        onChange({ fetchedModels: ids });
+        setStatus({ intent: "info", text: `Loaded ${ids.length} models from your account.` });
+      }
     } catch (e) {
       setStatus({ intent: "error", text: (e as Error).message });
     } finally {
@@ -131,8 +146,9 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
       <DrawerBody className="zee-settings">
         <section>
           <h3>Connection</h3>
-          <RadioGroup value={settings.authMode} onChange={(_, d) => onChange({ authMode: d.value as AuthMode })}>
+          <RadioGroup value={settings.authMode} onChange={(_, d) => onChange(switchAuthMode(settings, d.value as AuthMode))}>
             <Radio value="apiKey" label="Gemini API key (bring your own key)" />
+            <Radio value="openai" label="Other API key (Groq, OpenRouter, OpenAI, Mistral…)" />
             <Radio value="google" label="Google account (Vertex AI, your Cloud project quota)" />
             <Radio value="proxy" label="Team proxy (key kept on your server)" />
           </RadioGroup>
@@ -145,6 +161,68 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
               <Field label="Team access token" hint="The shared secret your admin configured on the proxy.">
                 <Input type="password" value={settings.proxyToken} onChange={(_, d) => onChange({ proxyToken: d.value })} autoComplete="off" />
               </Field>
+            </div>
+          ) : other ? (
+            <div className="zee-form">
+              <Field label="Provider" hint="Any service with an OpenAI-compatible API works. Pick Custom to type its base URL.">
+                <Dropdown
+                  value={otherPreset?.label ?? "Custom"}
+                  selectedOptions={[otherPreset?.id ?? "custom"]}
+                  onOptionSelect={(_, d) => {
+                    const p = OTHER_PROVIDERS.find((x) => x.id === d.optionValue);
+                    if (!p) return;
+                    onChange({ otherBaseUrl: p.baseUrl, otherFetchedModels: [], ...(p.model ? { model: p.model } : {}) });
+                  }}
+                >
+                  {OTHER_PROVIDERS.map((p) => (
+                    <Option key={p.id} value={p.id}>
+                      {p.label}
+                    </Option>
+                  ))}
+                  <Option value="custom">Custom</Option>
+                </Dropdown>
+              </Field>
+              <Field label="Base URL" hint="Ends in /v1 for most providers. Requests go to {base URL}/chat/completions.">
+                <Input value={settings.otherBaseUrl} onChange={(_, d) => onChange({ otherBaseUrl: d.value })} placeholder="https://api.groq.com/openai/v1" />
+              </Field>
+              <Field
+                label={`${otherName} API key`}
+                hint={
+                  <>
+                    {otherPreset ? (
+                      <>
+                        Create one at{" "}
+                        <Link inline onClick={() => openExternal(otherPreset.keyUrl)}>
+                          {otherPreset.keyUrl.replace(/^https:\/\//, "")}
+                        </Link>
+                        .{" "}
+                      </>
+                    ) : null}
+                    Stored only on this computer, never in the workbook.
+                  </>
+                }
+              >
+                <Input
+                  type={showKey ? "text" : "password"}
+                  value={settings.otherApiKey}
+                  onChange={(_, d) => onChange({ otherApiKey: d.value })}
+                  placeholder={otherPreset?.id === "groq" ? "gsk_…" : "sk-…"}
+                  autoComplete="off"
+                  contentAfter={
+                    <Button
+                      size="small"
+                      appearance="transparent"
+                      aria-label={showKey ? "Hide key" : "Show key"}
+                      icon={showKey ? <EyeOff20Regular /> : <Eye20Regular />}
+                      onClick={() => setShowKey(!showKey)}
+                    />
+                  }
+                />
+              </Field>
+              <p className="zee-muted">
+                Chat, agent mode, bulk fills and =ZEE.ASK() work with this key. Gemini-only features (Google Search, Python code execution, reading PDFs) are not
+                available; images need a model that accepts them.
+              </p>
             </div>
           ) : settings.authMode === "apiKey" ? (
             <Field
@@ -228,7 +306,10 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
 
         <section>
           <h3>Model</h3>
-          <Field label="Gemini model" hint={modelHint(settings.model) ?? "Custom model ID"}>
+          <Field
+            label={other ? `${otherName} model` : "Gemini model"}
+            hint={other ? "Model ID exactly as your provider lists it. Click ⟳ to load the models your key can use." : (modelHint(settings.model) ?? "Custom model ID")}
+          >
             <div className="zee-row">
               <Combobox
                 className="zee-grow"
@@ -244,29 +325,47 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
                   }
                 }}
               >
-                <OptionGroup label="Recommended">
-                  {DEFAULT_MODELS.map((m) => (
-                    <Option key={m.id} value={m.id} text={m.id}>
-                      {m.label}
+                {other ? (
+                  otherModels.length > 0 ? (
+                    <OptionGroup label={`From ${otherName}`}>
+                      {otherModels.map((id) => (
+                        <Option key={id} value={id}>
+                          {id}
+                        </Option>
+                      ))}
+                    </OptionGroup>
+                  ) : (
+                    <Option value={settings.model || " "} disabled>
+                      Click ⟳ to load models
                     </Option>
-                  ))}
-                </OptionGroup>
-                {extraModels.length > 0 && (
-                  <OptionGroup label="From your account">
-                    {extraModels.map((id) => (
-                      <Option key={id} value={id}>
-                        {id}
-                      </Option>
-                    ))}
-                  </OptionGroup>
+                  )
+                ) : (
+                  <>
+                    <OptionGroup label="Recommended">
+                      {DEFAULT_MODELS.map((m) => (
+                        <Option key={m.id} value={m.id} text={m.id}>
+                          {m.label}
+                        </Option>
+                      ))}
+                    </OptionGroup>
+                    {extraModels.length > 0 && (
+                      <OptionGroup label="From your account">
+                        {extraModels.map((id) => (
+                          <Option key={id} value={id}>
+                            {id}
+                          </Option>
+                        ))}
+                      </OptionGroup>
+                    )}
+                  </>
                 )}
               </Combobox>
-              {settings.authMode === "apiKey" && (
+              {(settings.authMode === "apiKey" || other) && (
                 <Button
                   aria-label="Refresh model list"
                   title="Load the models available to your key"
                   icon={refreshing ? <Spinner size="tiny" /> : <ArrowSync16Regular />}
-                  disabled={refreshing || !settings.apiKey.trim()}
+                  disabled={refreshing || !(other ? settings.otherApiKey : settings.apiKey).trim()}
                   onClick={refreshModels}
                 />
               )}
@@ -352,6 +451,7 @@ export function SettingsDrawer({ open, settings, usage, onChange, onImport, onCl
             onChange={(_, d) => onChange({ codeExecution: d.checked })}
             label="Run Python for calculations in chat (code execution)"
           />
+          {other && <p className="zee-muted">These two need a Gemini connection; with {otherName} they are ignored.</p>}
           <p className="zee-muted">
             Web search may add cost on your Google account (grounded requests are billed separately above the free allowance). In agent mode, web search is offered as a
             tool; code execution applies to chat answers.

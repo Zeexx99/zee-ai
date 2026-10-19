@@ -7,6 +7,7 @@
 import type { ZeeSettings } from "./settingsService";
 import { getValidGoogleToken } from "./authService";
 import { SseParser } from "../utils/sse";
+import { fromOpenAIResponse, modelIdsFromList, normalizeBaseUrl, OpenAIStreamDecoder, providerName, toOpenAIRequest, type GeminiStyleBody } from "./openaiCompat";
 
 /** A file sent with a message (image or PDF), base64-encoded. Never persisted in chat history. */
 export interface Attachment {
@@ -56,6 +57,50 @@ interface Endpoint {
 }
 
 const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta";
+
+/** Other API key: OpenAI-compatible provider (Groq, OpenRouter, OpenAI…). */
+interface OtherEndpoint {
+  base: string;
+  headers: Record<string, string>;
+  name: string;
+}
+
+function otherEndpoint(s: ZeeSettings): OtherEndpoint {
+  const base = normalizeBaseUrl(s.otherBaseUrl);
+  if (!base) throw new GeminiError("Enter the provider's base URL in Settings (e.g. https://api.groq.com/openai/v1).", "config");
+  const key = s.otherApiKey.trim();
+  const name = providerName(base);
+  if (!key) throw new GeminiError(`Add your ${name} API key in Settings (gear icon).`, "config");
+  return { base, name, headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` } };
+}
+
+/** One non-streamed request to the other provider, answered in Gemini's response shape. */
+async function otherGenerate(s: ZeeSettings, body: GeminiStyleBody, signal: AbortSignal | undefined, retries: number): Promise<GenerateResponse> {
+  const ep = otherEndpoint(s);
+  const res = await fetchWithRetry(
+    `${ep.base}/chat/completions`,
+    { method: "POST", headers: ep.headers, body: JSON.stringify(toOpenAIRequest(body, s.model, false)), signal },
+    s.model,
+    retries,
+    ep.name
+  );
+  const json = fromOpenAIResponse(await res.json()) as GenerateResponse;
+  if (json.error) throw new GeminiError(json.error.message ?? `${ep.name} error`, "server");
+  return json;
+}
+
+/** Models available to the other provider's key (GET {base}/models). */
+export async function listOtherModels(s: ZeeSettings): Promise<string[]> {
+  const ep = otherEndpoint(s);
+  let res: Response;
+  try {
+    res = await fetch(`${ep.base}/models`, { headers: ep.headers });
+  } catch {
+    throw new GeminiError(`Network error – check your internet connection and the base URL (${ep.base}).`, "network");
+  }
+  if (!res.ok) throw toGeminiError(res.status, await res.text(), "", ep.name);
+  return modelIdsFromList(await res.json());
+}
 
 function resolveEndpoint(s: ZeeSettings, model: string): Endpoint {
   const m = encodeURIComponent(model.trim());
@@ -154,7 +199,7 @@ function retryDelayMs(body: ApiErrorBody | null): number | null {
 }
 
 /** Map an HTTP error to a user-friendly GeminiError. */
-export function toGeminiError(status: number, bodyText: string, model: string): GeminiError {
+export function toGeminiError(status: number, bodyText: string, model: string, provider?: string): GeminiError {
   let body: ApiErrorBody | null = null;
   try {
     body = JSON.parse(bodyText) as ApiErrorBody;
@@ -162,6 +207,18 @@ export function toGeminiError(status: number, bodyText: string, model: string): 
     /* not JSON */
   }
   const apiMsg = body?.error?.message ?? bodyText.slice(0, 300);
+  if (provider) {
+    // Other API key (OpenAI-compatible provider).
+    if (status === 401 || (status === 400 && /api.?key/i.test(apiMsg)))
+      return new GeminiError(`Your ${provider} API key was rejected. Check it in Settings.`, "auth", status);
+    if (status === 403) return new GeminiError(`Permission denied by ${provider}: ${apiMsg}`, "auth", status);
+    if (status === 404 || /model.*(not found|does not exist|decommissioned)/i.test(apiMsg))
+      return new GeminiError(`Model "${model}" isn't available at ${provider}. Pick another model in Settings (click Refresh). ${apiMsg}`, "notFound", status);
+    if (status === 429) return new GeminiError(`Rate limit or quota exceeded at ${provider}. Wait a minute or pick a smaller model. ${apiMsg}`, "quota", status);
+    if (status === 413) return new GeminiError(`The request is too large for ${provider}. Select fewer cells or turn off the sheet map. ${apiMsg}`, "unknown", status);
+    if (status >= 500) return new GeminiError(`${provider} is temporarily unavailable (${status}). Please try again.`, "server", status);
+    return new GeminiError(`${provider} error ${status}: ${apiMsg}`, "unknown", status);
+  }
   if (status === 400 && /api key/i.test(apiMsg)) return new GeminiError("Your Gemini API key is invalid. Check it in Settings.", "auth", status);
   if (status === 401) return new GeminiError("Authentication failed – sign in again or re-check your key.", "auth", status);
   if (status === 403)
@@ -200,7 +257,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** fetch with automatic retry on 429 / 5xx (before any streamed bytes are consumed). */
-async function fetchWithRetry(url: string, init: RequestInit, model: string, retries = 2): Promise<Response> {
+async function fetchWithRetry(url: string, init: RequestInit, model: string, retries = 2, provider?: string): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     let res: Response;
     try {
@@ -223,7 +280,7 @@ async function fetchWithRetry(url: string, init: RequestInit, model: string, ret
       await sleep(wait, init.signal ?? undefined);
       continue;
     }
-    throw toGeminiError(res.status, text, model);
+    throw toGeminiError(res.status, text, model, provider);
   }
 }
 
@@ -312,12 +369,29 @@ export interface StreamOptions {
  */
 async function streamRequest(settings: ZeeSettings, body: unknown, signal: AbortSignal | undefined, onChunk: (c: GenerateResponse) => void): Promise<void> {
   const model = settings.model;
-  const ep = resolveEndpoint(settings, model);
-  const res = await fetchWithRetry(`${ep.url("streamGenerateContent")}?alt=sse`, { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal }, model);
+  const other = settings.authMode === "openai";
+  let res: Response;
+  let label = "Gemini";
+  if (other) {
+    const ep = otherEndpoint(settings);
+    label = ep.name;
+    const req = toOpenAIRequest(body as GeminiStyleBody, model, true);
+    res = await fetchWithRetry(`${ep.base}/chat/completions`, { method: "POST", headers: ep.headers, body: JSON.stringify(req), signal }, model, 2, ep.name);
+  } else {
+    const ep = resolveEndpoint(settings, model);
+    res = await fetchWithRetry(`${ep.url("streamGenerateContent")}?alt=sse`, { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal }, model);
+  }
   if (!res.body) throw new GeminiError("Streaming is not supported in this environment.", "unknown");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const parser = new SseParser();
+  const compat = other ? new OpenAIStreamDecoder() : null;
+  const handleChunk = (chunk: GenerateResponse) => {
+    if (chunk.error) throw new GeminiError(chunk.error.message ?? `${label} stream error`, "server");
+    if (chunk.promptFeedback?.blockReason)
+      throw new GeminiError(`The request was blocked by Gemini safety filters (${chunk.promptFeedback.blockReason}).`, "safety");
+    onChunk(chunk);
+  };
   const handle = (data: string) => {
     let chunk: GenerateResponse;
     try {
@@ -325,24 +399,26 @@ async function streamRequest(settings: ZeeSettings, body: unknown, signal: Abort
     } catch {
       return;
     }
-    if (chunk.error) throw new GeminiError(chunk.error.message ?? "Gemini stream error", "server");
-    if (chunk.promptFeedback?.blockReason)
-      throw new GeminiError(`The request was blocked by Gemini safety filters (${chunk.promptFeedback.blockReason}).`, "safety");
-    onChunk(chunk);
+    handleChunk(chunk);
+  };
+  const feed = (text: string) => {
+    if (compat) compat.push(text).forEach((c) => handleChunk(c as GenerateResponse));
+    else parser.push(text).forEach(handle);
   };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      parser.push(decoder.decode(value, { stream: true })).forEach(handle);
+      feed(decoder.decode(value, { stream: true }));
     }
-    parser.push(decoder.decode()).forEach(handle);
-    parser.flush().forEach(handle);
+    feed(decoder.decode());
+    if (compat) compat.end().forEach((c) => handleChunk(c as GenerateResponse));
+    else parser.flush().forEach(handle);
   } catch (e) {
     if ((e as Error).name === "AbortError") throw new GeminiError("Stopped.", "aborted");
     if (e instanceof GeminiError) throw e;
     // The connection dropped mid-stream (Wi-Fi, VPN, proxy timeout).
-    throw new GeminiError("The connection to Gemini dropped while answering. Please try again.", "network");
+    throw new GeminiError(`The connection to ${label} dropped while answering. Please try again.`, "network");
   }
 }
 
@@ -384,19 +460,23 @@ export async function generateJson<T>(opts: {
   signal?: AbortSignal;
 }): Promise<{ data: T; usage?: Usage }> {
   const { settings } = opts;
-  const ep = resolveEndpoint(settings, settings.model);
   const body = buildBody([{ role: "user", text: opts.prompt }], opts.systemInstruction, settings, {
     responseMimeType: "application/json",
     responseSchema: opts.schema,
   });
-  const res = await fetchWithRetry(
-    ep.url("generateContent"),
-    { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal: opts.signal },
-    settings.model,
-    3
-  );
-  const json = (await res.json()) as GenerateResponse;
-  const text = textOf(json);
+  let json: GenerateResponse;
+  if (settings.authMode === "openai") json = await otherGenerate(settings, body, opts.signal, 3);
+  else {
+    const ep = resolveEndpoint(settings, settings.model);
+    const res = await fetchWithRetry(
+      ep.url("generateContent"),
+      { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal: opts.signal },
+      settings.model,
+      3
+    );
+    json = (await res.json()) as GenerateResponse;
+  }
+  const text = textOf(json).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try {
     return { data: JSON.parse(text) as T, usage: usageOf(json) };
   } catch {
@@ -424,6 +504,12 @@ export async function listModels(apiKey: string): Promise<string[]> {
 
 /** Validates credentials + model access cheaply. Returns a success message or throws GeminiError. */
 export async function testConnection(s: ZeeSettings): Promise<string> {
+  if (s.authMode === "openai") {
+    const name = otherEndpoint(s).name;
+    const models = await listOtherModels(s);
+    const hasModel = !models.length || models.includes(s.model);
+    return `Connected to ${name} – ${models.length} models available.${hasModel ? "" : ` Note: "${s.model}" is not in the list – pick another model (Refresh).`}`;
+  }
   if (s.authMode === "apiKey") {
     const models = await listModels(s.apiKey);
     const hasModel = models.includes(s.model);
@@ -443,14 +529,14 @@ export async function testConnection(s: ZeeSettings): Promise<string> {
 /** One-shot plain text generation (used by the =ZEE.ASK() worksheet function). */
 export async function generateText(opts: { settings: ZeeSettings; prompt: string; systemInstruction: string; signal?: AbortSignal }): Promise<{ text: string; usage?: Usage }> {
   const { settings } = opts;
-  const ep = resolveEndpoint(settings, settings.model);
-  const res = await fetchWithRetry(
-    ep.url("generateContent"),
-    { method: "POST", headers: ep.headers, body: JSON.stringify(buildBody([{ role: "user", text: opts.prompt }], opts.systemInstruction, settings)), signal: opts.signal },
-    settings.model,
-    3
-  );
-  const json = (await res.json()) as GenerateResponse;
+  const body = buildBody([{ role: "user", text: opts.prompt }], opts.systemInstruction, settings);
+  let json: GenerateResponse;
+  if (settings.authMode === "openai") json = await otherGenerate(settings, body, opts.signal, 3);
+  else {
+    const ep = resolveEndpoint(settings, settings.model);
+    const res = await fetchWithRetry(ep.url("generateContent"), { method: "POST", headers: ep.headers, body: JSON.stringify(body), signal: opts.signal }, settings.model, 3);
+    json = (await res.json()) as GenerateResponse;
+  }
   if (json.promptFeedback?.blockReason) throw new GeminiError(`Blocked by safety filters (${json.promptFeedback.blockReason}).`, "safety");
   return { text: textOf(json).trim(), usage: usageOf(json) };
 }
@@ -544,6 +630,16 @@ export async function agentStep(opts: {
  */
 export async function groundedSearch(opts: { settings: ZeeSettings; query: string; signal?: AbortSignal }): Promise<{ text: string; sources: Source[]; usage?: Usage }> {
   const { settings } = opts;
+  if (settings.authMode === "openai") {
+    // Google Search grounding is Gemini-only: answer from the model's own knowledge and say so.
+    const plain = buildBody(
+      [{ role: "user", text: opts.query }],
+      "Web search is not available. Answer from your own knowledge, concisely, with concrete facts, numbers and dates, and say clearly that the information may be out of date.",
+      settings
+    );
+    const r = await otherGenerate(settings, plain, opts.signal, 2);
+    return { text: `(No live web search with this provider – answer from the model's own knowledge.)\n${textOf(r).trim()}`, sources: [], usage: usageOf(r) };
+  }
   const ep = resolveEndpoint(settings, settings.model);
   const body = {
     ...buildBody([{ role: "user", text: opts.query }], "Answer concisely with concrete facts, numbers and dates. Say when information may be out of date.", settings),

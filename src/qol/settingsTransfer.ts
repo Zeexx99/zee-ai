@@ -3,7 +3,7 @@ import { APP } from "./app";
 import { VERSION } from "./version";
 
 /** Keys never exported unless the user ticks "include API key / proxy token". */
-export const SECRET_KEYS = ["apiKey", "proxyToken"];
+export const SECRET_KEYS = ["apiKey", "otherApiKey", "proxyToken"];
 
 export interface SettingsExport {
   zeeSettingsExport: 1;
